@@ -89,16 +89,16 @@ class LlamaCppProfile(ProviderProfile):
             return None
 
 
-_profile = LlamaCppProfile()
-
-
 def register() -> None:
-    """Idempotent provider registration (last-writer-wins in the registry)."""
-    register_provider(_profile)
+    """(Re)register a freshly-built profile (last-writer-wins in the registry).
+
+    A new profile is built on every call so ``base_url`` is read from the current
+    environment — which lets settings applied by ``_wire_config`` (which sets
+    ``LLAMA_CPP_BASE_URL`` before this runs) take effect.
+    """
+    register_provider(LlamaCppProfile())
 
 
-# Self-register on import, mirroring every bundled model-provider plugin's
-# ``__init__.py`` contract. Also re-entrant: the general plugin's ``register(ctx)``
-# calls :func:`register` explicitly so the profile is available even if provider
-# discovery ran before plugin load.
+# Self-register on import so the profile is available even if ``register(ctx)``
+# is never called (e.g. when loaded as a standalone model-provider plugin).
 register()

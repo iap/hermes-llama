@@ -362,30 +362,34 @@ def _build_from_source(backend: str) -> dict:
 
 # ── install / uninstall / upgrade ────────────────────────────────────────────
 
-def install(backend: str | None = None, version: str | None = None) -> dict:
-    """Install llama.cpp (prebuilt first, source-build fallback). Never raises."""
+def install(backend: str | None = None, version: str | None = None, force: bool = False) -> dict:
+    """Install llama.cpp (prebuilt first, source-build fallback). Never raises.
+
+    ``force=True`` bypasses the "already installed and up to date" fast path
+    (used by ``upgrade``).
+    """
     try:
-        return _install_impl(backend, version)
+        return _install_impl(backend, version, force)
     except Exception as exc:  # noqa: BLE001 — honor the "never raises" contract
         return {"ok": False, "detail": f"Install failed: {exc}"}
 
 
-def _install_impl(backend: str | None, version: str | None) -> dict:
+def _install_impl(backend: str | None, version: str | None, force: bool) -> dict:
     backend = resolve_backend(backend)
     if backend == "source":
         # Explicit source build — used on hosts whose prebuilt is incompatible
         # (e.g. macOS < 13.3).
         return _build_from_source("cpu")
     existing = check()
-    if existing["installed"] and existing["runs"]:
-        return {
-            "ok": True,
-            "skipped": True,
-            "detail": f"Already installed and working: {existing['binary']}",
-        }
-
     # Version pinning: explicit arg > LLAMA_CPP_VERSION > latest release.
     version = version or os.environ.get("LLAMA_CPP_VERSION", "").strip() or None
+    # Skip only when already working AND nothing is forcing a change.
+    if existing["installed"] and existing["runs"] and not force:
+        if version:
+            if version == existing.get("tag"):
+                return {"ok": True, "skipped": True, "detail": f"Already installed at {version}."}
+        elif existing.get("up_to_date"):
+            return {"ok": True, "skipped": True, "detail": f"Already installed and up to date: {existing['binary']}"}
     tag = version or existing.get("latest_tag") or _latest_tag()
     if not tag:
         return {"ok": False, "detail": "Could not determine the latest release tag."}
@@ -421,7 +425,7 @@ def _install_impl(backend: str | None, version: str | None) -> dict:
 
 def upgrade(backend: str | None = None) -> dict:
     """Reinstall (respects the LLAMA_CPP_VERSION pin; latest release otherwise)."""
-    return install(backend=backend)
+    return install(backend=backend, force=True)
 
 
 def uninstall() -> dict:

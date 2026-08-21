@@ -259,7 +259,7 @@ def serve(alias: str) -> str:
         else:
             return f"Model '{alias}' is not downloaded yet. Run `/llama pull {alias}` first."
 
-    serve_alias = model["alias"]
+    serve_alias = model.get("alias", alias)
     s = _settings()
     # Explicit --alias keeps the /v1/models id clean and stable.
     cmd = [

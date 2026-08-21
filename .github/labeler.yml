@@ -3,8 +3,9 @@
 # label is applied. (Issues are already auto-labeled via the ISSUE_TEMPLATE
 # `labels:` field.)
 #
-# `title` matchers are case-insensitive regular expressions; `head-branch` and
-# the changed-file globs are gitignore-style patterns.
+# actions/labeler v7 supports only `changed-files`, `head-branch`, and
+# `base-branch` (no `title`/`body` matching). `head-branch`/`base-branch` are
+# regular expressions; `changed-files` globs are gitignore-style patterns.
 
 documentation:
   - changed-files:
@@ -26,9 +27,7 @@ dependencies:
           - 'ruff.toml'
 
 enhancement:
-  - head-branch: ['feature/*', 'feat/*', 'enhancement/*', 'add/*']
-  - title: ['^(feat|feature|add|enhancement)']
+  - head-branch: ['^feature/', '^feat/', '^enhancement/', '^add/']
 
 bug:
-  - head-branch: ['bug/*', 'fix/*', 'hotfix/*', 'patch/*']
-  - title: ['^(fix|bug|hotfix|patch)']
+  - head-branch: ['^bug/', '^fix/', '^hotfix/', '^patch/']
