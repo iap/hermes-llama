@@ -73,6 +73,8 @@ def test_asset_name():
     tag = "b10549"
     with _Platform(macos=True, arch="arm64"):
         assert install._asset_name(tag, "cpu") == "llama-b10549-bin-macos-arm64.tar.gz"
+        assert install._asset_name(tag, "cuda") is None  # no macOS cuda prebuilt
+        assert install._asset_name(tag, "vulkan") is None  # no macOS vulkan prebuilt
     with _Platform(windows=True, arch="x64"):
         assert install._asset_name(tag, "cpu") == "llama-b10549-bin-win-cpu-x64.zip"
         assert install._asset_name(tag, "cuda") == "llama-b10549-bin-win-cuda-12.4-x64.zip"
@@ -80,6 +82,7 @@ def test_asset_name():
     with _Platform(arch="x64"):  # Linux / other POSIX
         assert install._asset_name(tag, "cpu") == "llama-b10549-bin-ubuntu-x64.tar.gz"
         assert install._asset_name(tag, "vulkan") == "llama-b10549-bin-ubuntu-vulkan-x64.tar.gz"
+        assert install._asset_name(tag, "cuda") is None  # no Linux cuda prebuilt -> source
     with _Platform(arch="arm64"):
         assert install._asset_name(tag, "vulkan") == "llama-b10549-bin-ubuntu-vulkan-arm64.tar.gz"
 

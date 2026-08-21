@@ -287,6 +287,8 @@ def serve(alias: str) -> str:
             proc = subprocess.Popen(
                 cmd, stdout=log_file, stderr=log_file, start_new_session=True
             )
+    except OSError as exc:
+        return f"Failed to launch llama-server: {exc}"
     finally:
         log_file.close()
     _server_pid_path().write_text(str(proc.pid), encoding="utf-8")

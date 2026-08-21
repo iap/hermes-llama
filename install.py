@@ -197,9 +197,17 @@ def resolve_backend(explicit: str | None = None) -> str:
 
 
 def _asset_name(tag: str, backend: str) -> str | None:
-    """Return the prebuilt asset name for this host, or None if unavailable."""
+    """Return the prebuilt asset name for this host, or None if unavailable.
+
+    Returns ``None`` when the requested backend has no prebuilt asset for this
+    host (e.g. CUDA on Linux/macOS), so the caller falls back to a source build
+    instead of silently installing a mismatched (CPU) binary.
+    """
     arch = _arch()
     if _is_macos():
+        # macOS ships a single Metal/CPU prebuilt; no cuda/vulkan asset.
+        if backend in ("cuda", "vulkan"):
+            return None
         return f"llama-{tag}-bin-macos-{arch}.tar.gz"
     if _is_windows():
         if backend == "cuda" and arch == "x64":
@@ -212,6 +220,9 @@ def _asset_name(tag: str, backend: str) -> str | None:
     # Linux (or other POSIX).
     if backend == "vulkan":
         return f"llama-{tag}-bin-ubuntu-vulkan-{arch}.tar.gz"
+    if backend == "cuda":
+        # No Linux CUDA prebuilt -> source build with -DGGML_CUDA=ON.
+        return None
     return f"llama-{tag}-bin-ubuntu-{arch}.tar.gz"
 
 
