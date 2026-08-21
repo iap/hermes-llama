@@ -20,6 +20,9 @@ from pathlib import Path
 
 from . import install
 
+# Hugging Face endpoint — env-overridable for mirrors (LLAMA_CPP_HF_ENDPOINT).
+HF_BASE = os.environ.get("LLAMA_CPP_HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+
 # Liquid AI sample models (verified HF repos — see RESEARCH.md).
 # License: "LFM Open License v1.0" (non-commercial research; commercial use
 # limited to non-profits and entities < $10M annual revenue). Review before use.
@@ -56,11 +59,11 @@ LIQUIDAI_PRESETS = {
 
 
 def _registry_path() -> Path:
-    return install.install_root() / "models.json"
+    return install.install_root() / install.REGISTRY_FILE_NAME
 
 
 def _server_pid_path() -> Path:
-    return install.install_root() / "server.pid"
+    return install.install_root() / install.SERVER_PID_FILE_NAME
 
 
 def _load_registry() -> dict:
@@ -135,13 +138,13 @@ def _resolve_model(spec: str) -> tuple[str, str, str] | None:
 
 
 def _hf_file_url(repo: str, file: str) -> str:
-    return f"https://huggingface.co/{repo}/resolve/main/{file}"
+    return f"{HF_BASE}/{repo}/resolve/main/{file}"
 
 
 def _pick_gguf_file(repo: str) -> str | None:
     """Return the first GGUF filename in a repo, preferring Q4_K_M."""
     try:
-        url = f"https://huggingface.co/api/models/{repo}"
+        url = f"{HF_BASE}/api/models/{repo}"
         with urllib.request.urlopen(url, timeout=20) as resp:
             data = json.loads(resp.read().decode())
         files = [s.get("rfilename") for s in data.get("siblings", [])]
@@ -273,7 +276,7 @@ def serve(alias: str) -> str:
         "--parallel", str(s["parallel"]),
     ]
     install.install_root().mkdir(parents=True, exist_ok=True)
-    log_path = install.install_root() / "server.log"
+    log_path = install.install_root() / install.SERVER_LOG_FILE_NAME
     log_file = open(log_path, "ab")
     try:
         if sys.platform == "win32":

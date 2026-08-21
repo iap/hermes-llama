@@ -90,6 +90,9 @@ Environment variables (override plugin defaults):
 | `LLAMA_CPP_INSTALL_DIR` | `$HERMES_HOME/llama-cpp` | Root dir for the plugin-managed install |
 | `LLAMA_CPP_MODELS_DIR` | `$HERMES_HOME/llama-cpp/models` | Where GGUF models are stored |
 | `LLAMA_CPP_API_KEY` | *(empty)* | Optional `--api-key` / Bearer |
+| `LLAMA_CPP_GITHUB_BASE` | `https://github.com` | GitHub download/clone base (for GitHub Enterprise) |
+| `LLAMA_CPP_GITHUB_API_BASE` | `https://api.github.com` | GitHub API base (for GitHub Enterprise) |
+| `LLAMA_CPP_HF_ENDPOINT` | `https://huggingface.co` | Hugging Face endpoint (for mirrors) |
 
 > The same keys are also settable as Hermes plugin settings
 > (`hermes config` → `plugins.entries.hermes-llama.settings.*`, mirroring the

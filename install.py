@@ -30,9 +30,26 @@ import zipfile
 from pathlib import Path
 
 REPO = "ggml-org/llama.cpp"
-GITHUB_API = f"https://api.github.com/repos/{REPO}"
+# Endpoints — env-overridable for GitHub Enterprise / HF mirror deployments.
+GITHUB_BASE = os.environ.get("LLAMA_CPP_GITHUB_BASE", "https://github.com").rstrip("/")
+GITHUB_API_BASE = os.environ.get("LLAMA_CPP_GITHUB_API_BASE", "https://api.github.com").rstrip("/")
+GITHUB_API = f"{GITHUB_API_BASE}/repos/{REPO}"
 SERVER_BIN = "llama-server.exe" if sys.platform == "win32" else "llama-server"
 BACKENDS = ("cpu", "cuda", "vulkan", "source")
+
+# Layout segments under install_root() — centralized so no path segment is
+# repeated as a bare string literal (see CONTRIBUTING.md "no hardcoded paths").
+DEFAULT_HERMES_DIR_NAME = ".hermes"
+INSTALL_DIR_NAME = "llama-cpp"
+BIN_DIR_NAME = "bin"
+MODELS_DIR_NAME = "models"
+SRC_DIR_NAME = "src"
+SRC_REPO_DIR_NAME = "llama.cpp"
+CACHE_DIR_NAME = ".cache"
+VERSION_FILE_NAME = ".version"
+SERVER_LOG_FILE_NAME = "server.log"
+SERVER_PID_FILE_NAME = "server.pid"
+REGISTRY_FILE_NAME = "models.json"
 
 
 def _is_windows() -> bool:
@@ -55,33 +72,33 @@ def _arch() -> str:
 # ── paths ────────────────────────────────────────────────────────────────────
 
 def _hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    return Path(os.environ.get("HERMES_HOME", str(Path.home() / DEFAULT_HERMES_DIR_NAME)))
 
 
 def install_root() -> Path:
     override = os.environ.get("LLAMA_CPP_INSTALL_DIR", "").strip()
     if override:
         return Path(override).expanduser()
-    return _hermes_home() / "llama-cpp"
+    return _hermes_home() / INSTALL_DIR_NAME
 
 
 def bin_dir() -> Path:
-    return install_root() / "bin"
+    return install_root() / BIN_DIR_NAME
 
 
 def models_dir() -> Path:
     override = os.environ.get("LLAMA_CPP_MODELS_DIR", "").strip()
     if override:
         return Path(override).expanduser()
-    return install_root() / "models"
+    return install_root() / MODELS_DIR_NAME
 
 
 def _meta_path() -> Path:
-    return install_root() / ".version"
+    return install_root() / VERSION_FILE_NAME
 
 
 def _cache_dir() -> Path:
-    return install_root() / ".cache"
+    return install_root() / CACHE_DIR_NAME
 
 
 def _read_meta() -> dict:
@@ -257,7 +274,7 @@ def _download_cached(tag: str, asset: str) -> Path | None:
     dest = cache / f"{tag}-{asset}"
     if dest.is_file() and dest.stat().st_size > 0:
         return dest
-    url = f"https://github.com/{REPO}/releases/download/{tag}/{asset}"
+    url = f"{GITHUB_BASE}/{REPO}/releases/download/{tag}/{asset}"
     try:
         _download(url, dest)
         return dest if dest.stat().st_size > 0 else None
@@ -315,15 +332,15 @@ def _build_from_source(backend: str) -> dict:
             "detail": (
                 "No prebuilt binary matches this host and CMake is not installed. "
                 "Run `python3 -m pip install cmake` (or install CMake), then retry. "
-                f"Or: git clone https://github.com/{REPO} && cmake -B build "
+                f"Or: git clone {GITHUB_BASE}/{REPO} && cmake -B build "
                 "&& cmake --build build --config Release -j"
             ),
         }
-    src = install_root() / "src" / "llama.cpp"
+    src = install_root() / SRC_DIR_NAME / SRC_REPO_DIR_NAME
     if not (src / "CMakeLists.txt").is_file():
         src.parent.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(
-            ["git", "clone", "--depth", "1", f"https://github.com/{REPO}", str(src)],
+            ["git", "clone", "--depth", "1", f"{GITHUB_BASE}/{REPO}", str(src)],
             capture_output=True, text=True, timeout=600,
         )
         if proc.returncode != 0:
@@ -467,6 +484,6 @@ def _uninstall_impl() -> dict:
 
 
 def _remove_plugin_artifacts() -> None:
-    for sub in ("bin", "src", ".cache"):
+    for sub in (BIN_DIR_NAME, SRC_DIR_NAME, CACHE_DIR_NAME):
         shutil.rmtree(install_root() / sub, ignore_errors=True)
     _meta_path().unlink(missing_ok=True)
