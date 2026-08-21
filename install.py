@@ -315,7 +315,7 @@ def _build_from_source(backend: str) -> dict:
             "detail": (
                 "No prebuilt binary matches this host and CMake is not installed. "
                 "Run `python3 -m pip install cmake` (or install CMake), then retry. "
-                "Or: git clone https://github.com/ggml-org/llama.cpp && cmake -B build "
+                f"Or: git clone https://github.com/{REPO} && cmake -B build "
                 "&& cmake --build build --config Release -j"
             ),
         }
