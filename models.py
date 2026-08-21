@@ -76,7 +76,9 @@ def _load_registry() -> dict:
 def _save_registry(reg: dict) -> None:
     path = _registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(reg, indent=2), encoding="utf-8")
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(reg, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def list_models() -> str:
@@ -95,14 +97,25 @@ def list_models() -> str:
     return "\n".join(lines)
 
 
+def _int_env(name: str, default: int) -> int:
+    """Parse an integer env var defensively (fall back to default on garbage)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def _settings() -> dict:
     """Resolve runtime settings: env overrides > defaults."""
     return {
         "host": os.environ.get("LLAMA_CPP_HOST", "127.0.0.1"),
-        "port": int(os.environ.get("LLAMA_CPP_PORT", "8080")),
-        "ctx_size": int(os.environ.get("LLAMA_CPP_CTX_SIZE", "2048")),
-        "n_gpu_layers": int(os.environ.get("LLAMA_CPP_N_GPU_LAYERS", "0")),
-        "parallel": int(os.environ.get("LLAMA_CPP_PARALLEL", "1")),
+        "port": _int_env("LLAMA_CPP_PORT", 8080),
+        "ctx_size": _int_env("LLAMA_CPP_CTX_SIZE", 2048),
+        "n_gpu_layers": _int_env("LLAMA_CPP_N_GPU_LAYERS", 0),
+        "parallel": _int_env("LLAMA_CPP_PARALLEL", 1),
     }
 
 
@@ -157,24 +170,38 @@ def pull(spec: str, alias: str | None = None) -> str:
         file = _pick_gguf_file(repo)
         if not file:
             return f"No .gguf file found in {repo}."
+    # HF sibling names may include subdirs; keep only the basename locally so the
+    # download lands in models_dir (and a hostile listing can't escape it).
+    remote_file = file
+    local_name = Path(file).name
     alias = alias or default_alias
     dest_dir = install.models_dir()
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / file
+    dest = dest_dir / local_name
     if dest.is_file():
-        return f"Already present: {dest}"
-    url = _hf_file_url(repo, file)
+        # Re-register an existing file (repairs a lost/corrupted registry entry).
+        reg = _load_registry()
+        reg[alias] = {
+            "repo": repo, "file": local_name, "path": str(dest),
+            "size_gb": round(dest.stat().st_size / 1024**3, 2),
+        }
+        _save_registry(reg)
+        return f"Already present: {dest} (registered as '{alias}')."
+    url = _hf_file_url(repo, remote_file)
+    tmp = dest.with_suffix(dest.suffix + ".part")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
-        with urllib.request.urlopen(req, timeout=3600) as resp, open(dest, "wb") as out:
+        with urllib.request.urlopen(req, timeout=3600) as resp, open(tmp, "wb") as out:
             shutil.copyfileobj(resp, out)
+        os.replace(tmp, dest)
     except Exception as exc:
+        tmp.unlink(missing_ok=True)
         return f"Download failed: {exc}"
     size_gb = round(dest.stat().st_size / 1024**3, 2)
     reg = _load_registry()
-    reg[alias] = {"repo": repo, "file": file, "path": str(dest), "size_gb": size_gb}
+    reg[alias] = {"repo": repo, "file": local_name, "path": str(dest), "size_gb": size_gb}
     _save_registry(reg)
-    return f"Downloaded {repo}/{file} ({size_gb} GB) → registered as '{alias}'."
+    return f"Downloaded {repo}/{remote_file} ({size_gb} GB) → registered as '{alias}'."
 
 
 def _find_loaded_server() -> int | None:
@@ -221,47 +248,53 @@ def serve(alias: str) -> str:
                 f"Unknown model '{alias}'. Run `/llama models` to see presets, "
                 f"then `/llama pull {alias}`."
             )
-        _repo, file, _default_alias = resolved
+        _repo, file, default_alias = resolved
         file = file or _pick_gguf_file(_repo) or ""
         if not file:
             return f"No .gguf file found in {_repo}."
-        path = install.models_dir() / file
+        path = install.models_dir() / Path(file).name
         if path.is_file():
-            model = {"path": str(path), "alias": alias}
+            # Use the preset's canonical alias so /v1/models matches `pull`'s id.
+            model = {"path": str(path), "alias": default_alias}
         else:
             return f"Model '{alias}' is not downloaded yet. Run `/llama pull {alias}` first."
 
+    serve_alias = model["alias"]
     s = _settings()
     # Explicit --alias keeps the /v1/models id clean and stable.
     cmd = [
         str(binary),
         "--model", model["path"],
-        "--alias", alias,
+        "--alias", serve_alias,
         "--host", s["host"],
         "--port", str(s["port"]),
         "--ctx-size", str(s["ctx_size"]),
         "--n-gpu-layers", str(s["n_gpu_layers"]),
         "--parallel", str(s["parallel"]),
     ]
+    install.install_root().mkdir(parents=True, exist_ok=True)
     log_path = install.install_root() / "server.log"
     log_file = open(log_path, "ab")
-    if sys.platform == "win32":
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=log_file,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
-    else:
-        proc = subprocess.Popen(
-            cmd, stdout=log_file, stderr=log_file, start_new_session=True
-        )
+    try:
+        if sys.platform == "win32":
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=log_file,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        else:
+            proc = subprocess.Popen(
+                cmd, stdout=log_file, stderr=log_file, start_new_session=True
+            )
+    finally:
+        log_file.close()
     _server_pid_path().write_text(str(proc.pid), encoding="utf-8")
     base = f"http://{s['host']}:{s['port']}"
     ready = _wait_healthy(base, timeout=30)
     state = "ready" if ready else "still loading (watch `/llama status`)"
     return (
-        f"Started llama-server (pid {proc.pid}) with model '{alias}' on "
+        f"Started llama-server (pid {proc.pid}) with model '{serve_alias}' on "
         f"{base}/v1 — {state}. It will appear as provider 'Llama CPP'."
     )
 

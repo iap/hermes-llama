@@ -42,11 +42,11 @@ config_schema:
   install_dir:
     type: str
     default: ""
-    description: "Directory for plugin-managed llama.cpp binaries. Empty = auto ($HERMES_HOME/llama-cpp/bin)."
+    description: "Root directory for plugin-managed llama.cpp (bin/src/cache). Empty = auto ($HERMES_HOME/llama-cpp)."
   backend:
     type: str
-    default: "cpu"
-    description: "Compute backend for the prebuilt (cpu|cuda|vulkan). Empty/auto detects NVIDIA on Windows, else CPU."
+    default: "auto"
+    description: "Compute backend: auto|cpu|cuda|vulkan|source. 'auto' detects NVIDIA on Windows, else CPU."
   version:
     type: str
     default: ""
@@ -55,7 +55,3 @@ config_schema:
     type: str
     default: ""
     description: "Directory where GGUF models are stored. Empty = auto ($HERMES_HOME/llama-cpp/models)."
-  default_model:
-    type: str
-    default: "liquidai"
-    description: "Model alias to serve by default (see `hermes-llama models`)."

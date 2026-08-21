@@ -11,7 +11,8 @@ Subcommands: check, install, uninstall, status, models, pull, serve, stop, help.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+import os
+from typing import Any
 
 from . import install, models, provider
 
@@ -45,9 +46,19 @@ def _dispatch(cmd: str, argv: list[str]) -> str:
         return HELP
     if cmd == "check":
         r = install.check()
-        if r["installed"]:
-            return f"llama-server installed at {r['binary']} (version: {r.get('version', 'unknown')}, method: {r.get('method', 'unknown')})"
-        return "llama-server is NOT installed. Run `/llama install`."
+        if not r["installed"]:
+            return "llama-server is NOT installed. Run `/llama install`."
+        if r.get("runs"):
+            line = f"llama-server installed at {r['binary']} — version: {r.get('version') or 'unknown'}"
+        else:
+            line = f"llama-server installed at {r['binary']} — DOES NOT RUN: {r.get('version') or 'unknown reason'}"
+        if r.get("up_to_date") is True:
+            line += f"; up to date (release {r.get('latest_tag')})"
+        elif r.get("up_to_date") is False:
+            line += f"; update available ({r.get('tag')} → {r.get('latest_tag')})"
+        elif r.get("latest_tag"):
+            line += f"; latest release: {r.get('latest_tag')}"
+        return line
     if cmd == "install":
         return _fmt_dict(install.install())
     if cmd == "upgrade":
@@ -87,7 +98,47 @@ def _handle_cli(args: Any) -> None:
     print(_dispatch(args.sub, list(args.args)))
 
 
+# config_schema key -> LLAMA_CPP_* env var (the stdlib modules read env vars).
+_CONFIG_ENV = {
+    "base_url": "LLAMA_CPP_BASE_URL",
+    "host": "LLAMA_CPP_HOST",
+    "port": "LLAMA_CPP_PORT",
+    "ctx_size": "LLAMA_CPP_CTX_SIZE",
+    "n_gpu_layers": "LLAMA_CPP_N_GPU_LAYERS",
+    "parallel": "LLAMA_CPP_PARALLEL",
+    "backend": "LLAMA_CPP_BACKEND",
+    "version": "LLAMA_CPP_VERSION",
+    "install_dir": "LLAMA_CPP_INSTALL_DIR",
+    "models_dir": "LLAMA_CPP_MODELS_DIR",
+}
+
+
+def _wire_config(ctx: Any) -> None:
+    """Apply Hermes settings (config_schema) to the LLAMA_CPP_* env vars.
+
+    Precedence: an explicitly-set env var wins; otherwise a value in Hermes
+    settings (``plugins.entries.<id>.settings.<key>``) is applied. Schema
+    defaults are never written into the environment, so ``backend=auto``
+    detection and the modules' own defaults stay intact.
+    """
+    if not hasattr(ctx, "get_config"):
+        return
+    for key, env_name in _CONFIG_ENV.items():
+        if os.environ.get(env_name):
+            continue
+        try:
+            val = ctx.get_config(key)
+        except Exception:
+            val = None
+        if val is not None and str(val).strip() != "":
+            os.environ[env_name] = str(val).strip()
+
+
 def register(ctx: Any) -> None:
+    # 0. Wire Hermes settings (config_schema) into the LLAMA_CPP_* env vars the
+    #    stdlib modules read. Env vars already set by the user win.
+    _wire_config(ctx)
+
     # 1. Ensure the "Llama CPP" provider profile is registered (idempotent).
     provider.register()
 

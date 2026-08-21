@@ -59,6 +59,9 @@ def _hermes_home() -> Path:
 
 
 def install_root() -> Path:
+    override = os.environ.get("LLAMA_CPP_INSTALL_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
     return _hermes_home() / "llama-cpp"
 
 
@@ -67,6 +70,9 @@ def bin_dir() -> Path:
 
 
 def models_dir() -> Path:
+    override = os.environ.get("LLAMA_CPP_MODELS_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
     return install_root() / "models"
 
 
@@ -129,6 +135,16 @@ def _smoke_test(binary: Path, timeout: float = 8.0) -> tuple[bool, str]:
 
 def check() -> dict:
     """Return install status incl. version, runs flag, and upgrade hint. Never raises."""
+    try:
+        return _check_impl()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "installed": False, "binary": None, "version": None, "runs": False,
+            "tag": None, "latest_tag": None, "up_to_date": None, "detail": str(exc),
+        }
+
+
+def _check_impl() -> dict:
     result = {
         "installed": False,
         "binary": None,
@@ -166,14 +182,18 @@ def _nvidia_present() -> bool:
 
 
 def resolve_backend(explicit: str | None = None) -> str:
-    """Pick a backend: explicit arg/env > light auto-detect > cpu."""
+    """Pick a backend: explicit arg/env > light auto-detect > cpu.
+
+    ``""`` and ``"auto"`` both mean "auto-detect" (NVIDIA on Windows → CUDA,
+    otherwise CPU). Unknown values fall back to CPU.
+    """
     want = (explicit or os.environ.get("LLAMA_CPP_BACKEND", "") or "").strip().lower()
-    if want:
-        return want if want in BACKENDS else "cpu"
-    # No CUDA prebuilt exists for Linux/macOS; CUDA auto-detect only helps Windows.
-    if _is_windows() and _nvidia_present():
-        return "cuda"
-    return "cpu"
+    if want in ("", "auto"):
+        # No CUDA prebuilt exists for Linux/macOS; CUDA auto-detect only helps Windows.
+        if _is_windows() and _nvidia_present():
+            return "cuda"
+        return "cpu"
+    return want if want in BACKENDS else "cpu"
 
 
 def _asset_name(tag: str, backend: str) -> str | None:
@@ -207,9 +227,16 @@ def _latest_tag() -> str | None:
 
 
 def _download(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
-    with urllib.request.urlopen(req, timeout=600) as resp, open(dest, "wb") as out:
-        shutil.copyfileobj(resp, out)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        os.replace(tmp, dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _download_cached(tag: str, asset: str) -> Path | None:
@@ -268,16 +295,8 @@ def _install_extracted(extracted: Path, dest_bin: Path) -> Path | None:
 
 # ── source build ─────────────────────────────────────────────────────────────
 
-def _cmake_cmd() -> str | None:
-    for name in ("cmake",):
-        p = shutil.which(name)
-        if p:
-            return p
-    return None
-
-
 def _build_from_source(backend: str) -> dict:
-    cmake = _cmake_cmd()
+    cmake = shutil.which("cmake")
     if cmake is None:
         return {
             "ok": False,
@@ -315,12 +334,22 @@ def _build_from_source(backend: str) -> dict:
     )
     if proc.returncode != 0:
         return {"ok": False, "method": "source", "detail": f"build failed: {proc.stderr.strip()[:300]}"}
-    # Copy the whole bin/ dir (binaries + shared libs).
-    bin_src = build / "bin"
-    if bin_src.is_dir():
-        for item in bin_src.iterdir():
-            if item.is_file():
-                shutil.copy2(item, bin_dir() / item.name)
+    # Locate the built llama-server + its shared libs. Single-config generators
+    # (Unix Makefiles / Ninja) emit into ``build/bin/``; multi-config generators
+    # (Visual Studio on Windows) emit into ``build/bin/<Config>/`` (e.g. Release).
+    server_dir: Path | None = None
+    for root, _dirs, files in os.walk(str(build)):
+        if "llama-server" in files or "llama-server.exe" in files:
+            server_dir = Path(root)
+            break
+    if server_dir is None:
+        return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
+    # Clear any previous install, then install the whole dir (binary + shared libs).
+    shutil.rmtree(bin_dir(), ignore_errors=True)
+    bin_dir().mkdir(parents=True, exist_ok=True)
+    for item in server_dir.iterdir():
+        if item.is_file():
+            shutil.copy2(item, bin_dir() / item.name)
     moved = find_binary()
     if moved is None:
         return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
@@ -335,6 +364,13 @@ def _build_from_source(backend: str) -> dict:
 
 def install(backend: str | None = None, version: str | None = None) -> dict:
     """Install llama.cpp (prebuilt first, source-build fallback). Never raises."""
+    try:
+        return _install_impl(backend, version)
+    except Exception as exc:  # noqa: BLE001 — honor the "never raises" contract
+        return {"ok": False, "detail": f"Install failed: {exc}"}
+
+
+def _install_impl(backend: str | None, version: str | None) -> dict:
     backend = resolve_backend(backend)
     if backend == "source":
         # Explicit source build — used on hosts whose prebuilt is incompatible
@@ -348,7 +384,9 @@ def install(backend: str | None = None, version: str | None = None) -> dict:
             "detail": f"Already installed and working: {existing['binary']}",
         }
 
-    tag = version or _latest_tag()
+    # Version pinning: explicit arg > LLAMA_CPP_VERSION > latest release.
+    version = version or os.environ.get("LLAMA_CPP_VERSION", "").strip() or None
+    tag = version or existing.get("latest_tag") or _latest_tag()
     if not tag:
         return {"ok": False, "detail": "Could not determine the latest release tag."}
     asset = _asset_name(tag, backend)
@@ -382,21 +420,38 @@ def install(backend: str | None = None, version: str | None = None) -> dict:
 
 
 def upgrade(backend: str | None = None) -> dict:
-    """Reinstall to the latest tag (idempotent)."""
+    """Reinstall (respects the LLAMA_CPP_VERSION pin; latest release otherwise)."""
     return install(backend=backend)
 
 
 def uninstall() -> dict:
-    """Remove the plugin-managed install (bin + source + metadata + cache)."""
+    """Remove the plugin-managed llama.cpp install. Never raises.
+
+    Removes ``bin/``, ``src/``, and ``.cache/`` plus version metadata, but NEVER
+    the ``models/`` dir or ``models.json`` — downloaded GGUFs are user data and
+    survive uninstall.
+    """
+    try:
+        return _uninstall_impl()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "detail": f"Uninstall failed: {exc}"}
+
+
+def _uninstall_impl() -> dict:
     binary = find_binary()
-    if binary and str(binary).startswith(str(bin_dir())):
-        shutil.rmtree(bin_dir(), ignore_errors=True)
-        _meta_path().unlink(missing_ok=True)
-        return {"ok": True, "detail": f"Removed {bin_dir()}"}
-    if binary:
+    if binary is not None and binary.is_relative_to(bin_dir()):
+        _remove_plugin_artifacts()
+        return {"ok": True, "detail": f"Removed plugin-managed llama.cpp (models kept at {models_dir()})."}
+    if binary is not None:
         return {
             "ok": False,
             "detail": "llama-server was not installed by hermes-llama; remove it with the tool that installed it.",
         }
-    shutil.rmtree(install_root(), ignore_errors=True)
-    return {"ok": True, "detail": "Nothing installed; cleared plugin directory."}
+    _remove_plugin_artifacts()
+    return {"ok": True, "detail": "Nothing installed; cleared plugin artifacts (models kept)."}
+
+
+def _remove_plugin_artifacts() -> None:
+    for sub in ("bin", "src", ".cache"):
+        shutil.rmtree(install_root() / sub, ignore_errors=True)
+    _meta_path().unlink(missing_ok=True)

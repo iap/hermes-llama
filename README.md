@@ -85,9 +85,16 @@ Environment variables (override plugin defaults):
 | `LLAMA_CPP_CTX_SIZE` | `2048` | `--ctx-size` (tokens) |
 | `LLAMA_CPP_N_GPU_LAYERS` | `0` | `--n-gpu-layers` (0 = CPU-only) |
 | `LLAMA_CPP_PARALLEL` | `1` | `--parallel` slots |
-| `LLAMA_CPP_BACKEND` | `cpu` | `cpu` / `cuda` / `vulkan` (prebuilt selection) |
+| `LLAMA_CPP_BACKEND` | `auto` | `auto` / `cpu` / `cuda` / `vulkan` / `source` (prebuilt selection) |
 | `LLAMA_CPP_VERSION` | *(latest)* | Pin a release tag (e.g. `b10549`) |
+| `LLAMA_CPP_INSTALL_DIR` | `$HERMES_HOME/llama-cpp` | Root dir for the plugin-managed install |
+| `LLAMA_CPP_MODELS_DIR` | `$HERMES_HOME/llama-cpp/models` | Where GGUF models are stored |
 | `LLAMA_CPP_API_KEY` | *(empty)* | Optional `--api-key` / Bearer |
+
+> The same keys are also settable as Hermes plugin settings
+> (`hermes config` → `plugins.entries.hermes-llama.settings.*`, mirroring the
+> `config_schema` in `plugin.yaml`). An explicitly-set `LLAMA_CPP_*` environment
+> variable takes precedence over the Hermes setting.
 
 ## Platform notes
 

@@ -18,8 +18,6 @@ import json
 import logging
 import os
 import urllib.request
-from typing import Any
-
 from providers import register_provider
 from providers.base import ProviderProfile
 
@@ -65,10 +63,11 @@ class LlamaCppProfile(ProviderProfile):
 
             {"object": "list", "data": [{"id": "<model-alias>", "object": "model"}]}
 
-        The ``id`` is the GGUF filename stem unless the server was started with
-        ``--alias``. We return those ids directly so they appear under the
-        "Llama CPP" provider. Returns ``None`` (with a logged reason) when the
-        server is down so callers fall back to the static list.
+        The ``id`` defaults to the full ``-m`` model path unless the server was
+        started with ``--alias`` (which this plugin always does). We return those
+        ids directly so they appear under the "Llama CPP" provider. Returns
+        ``None`` (with a logged reason) when the server is down so callers fall
+        back to the static list.
         """
         effective_base = (base_url or self.base_url or DEFAULT_BASE_URL).rstrip("/")
         # llama-server serves OpenAI-compat under /v1; /v1/models is the catalog.

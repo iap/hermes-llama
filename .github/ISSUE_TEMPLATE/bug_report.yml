@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a bug in hermes-llama
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! The more detail you provide, the faster we can reproduce and fix it.
+
+  - type: input
+    id: version
+    attributes:
+      label: Plugin version
+      description: "Output of `hermes llama check` (or the `version` field in plugin.yaml)."
+      placeholder: "e.g. 0.1.0 / llama.cpp b10549"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      description: Which OS is the plugin running on?
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected to happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or clicks.
+      placeholder: |
+        1. Ran `/llama install`
+        2. Then ...
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output / logs
+      description: Paste the command output, `server.log`, or the traceback.
+      render: shell
