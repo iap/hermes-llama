@@ -1,0 +1,34 @@
+# Auto-labels for pull requests. Consumed by .github/workflows/labeler.yml
+# (actions/labeler@v7). Each label lists matchers; if ANY matcher matches, the
+# label is applied. (Issues are already auto-labeled via the ISSUE_TEMPLATE
+# `labels:` field.)
+#
+# `title` matchers are case-insensitive regular expressions; `head-branch` and
+# the changed-file globs are gitignore-style patterns.
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**'
+          - 'skills/**'
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'requirements*.txt'
+          - 'pyproject.toml'
+          - 'setup.py'
+          - 'setup.cfg'
+          - 'Pipfile*'
+          - 'poetry.lock'
+          - '.github/labels.yml'
+          - 'ruff.toml'
+
+enhancement:
+  - head-branch: ['feature/*', 'feat/*', 'enhancement/*', 'add/*']
+  - title: ['^(feat|feature|add|enhancement)']
+
+bug:
+  - head-branch: ['bug/*', 'fix/*', 'hotfix/*', 'patch/*']
+  - title: ['^(fix|bug|hotfix|patch)']
