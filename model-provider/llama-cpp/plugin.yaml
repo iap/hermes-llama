@@ -1,0 +1,5 @@
+name: llama-cpp-provider
+kind: model-provider
+version: 1.0.0
+description: Local llama.cpp llama-server (OpenAI-compatible) as provider "Llama CPP"
+author: hermes-llama
