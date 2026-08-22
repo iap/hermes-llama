@@ -805,18 +805,31 @@ def uninstall() -> dict:
         return {"ok": False, "detail": f"Uninstall failed: {exc}"}
 
 
+def _plugin_owned() -> bool:
+    """True when the install root holds plugin-managed artifacts.
+
+    Ownership is derived from the plugin's own layout — the server binary in
+    ``bin/`` or the ``.version`` metadata file — and NEVER from ``PATH``. A
+    system ``llama-server`` on ``PATH`` must not block plugin cleanup (M5):
+    ``find_binary()`` falls back to ``shutil.which``, which would otherwise make
+    us refuse and leak every artifact (bin/, src/, .cache/, …).
+    """
+    if (bin_dir() / SERVER_BIN).is_file():
+        return True
+    if _meta_path().is_file():
+        return True
+    return False
+
+
 def _uninstall_impl() -> dict:
-    binary = find_binary()
-    if binary is not None and binary.is_relative_to(bin_dir()):
+    # Ownership is derived from the plugin's own layout, never from PATH (M5).
+    if not _plugin_owned():
+        # No plugin-managed install. Still clear any stray swap temps / pid left
+        # by an aborted prior install, but report "nothing installed".
         _remove_plugin_artifacts()
-        return {"ok": True, "detail": f"Removed plugin-managed llama.cpp (models kept at {models_dir()})."}
-    if binary is not None:
-        return {
-            "ok": False,
-            "detail": "llama-server was not installed by hermes-llama; remove it with the tool that installed it.",
-        }
+        return {"ok": True, "detail": "Nothing installed; cleared plugin artifacts (models kept)."}
     _remove_plugin_artifacts()
-    return {"ok": True, "detail": "Nothing installed; cleared plugin artifacts (models kept)."}
+    return {"ok": True, "detail": f"Removed plugin-managed llama.cpp (models kept at {models_dir()})."}
 
 
 def _remove_plugin_artifacts() -> None:
