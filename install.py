@@ -190,6 +190,24 @@ def _write_meta(meta: dict) -> None:
     os.replace(tmp, path)
 
 
+def _source_commit() -> str | None:
+    """Return the current HEAD commit of the source checkout, or None.
+
+    Used by ``check()`` to report source-build freshness honestly. Returns None
+    when there is no checkout or git is unavailable, so callers never raise.
+    """
+    src = install_root() / SRC_DIR_NAME / SRC_REPO_DIR_NAME
+    if not (src / ".git").is_dir():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(src), capture_output=True, text=True, timeout=60
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
 # ── discovery ────────────────────────────────────────────────────────────────
 
 def find_binary() -> Path | None:
@@ -539,14 +557,33 @@ def _build_from_source(backend: str) -> dict:
             ),
         }
     src = install_root() / SRC_DIR_NAME / SRC_REPO_DIR_NAME
+    src.parent.mkdir(parents=True, exist_ok=True)
     if not (src / "CMakeLists.txt").is_file():
-        src.parent.mkdir(parents=True, exist_ok=True)
+        # Fresh checkout — clone the full history (not --depth 1) so subsequent
+        # rebuilds can `git fetch` + reset instead of re-cloning from scratch.
         proc = subprocess.run(
-            ["git", "clone", "--depth", "1", f"{GITHUB_BASE}/{REPO}", str(src)],
+            ["git", "clone", f"{GITHUB_BASE}/{REPO}", str(src)],
             capture_output=True, text=True, timeout=600,
         )
         if proc.returncode != 0:
             return {"ok": False, "method": "source", "detail": f"git clone failed: {proc.stderr.strip()[:300]}"}
+    else:
+        # Refresh the existing checkout so a rebuild picks up upstream fixes
+        # rather than reusing a stale local master.
+        for git_args in (
+            ["git", "fetch", "origin"],
+            ["git", "reset", "--hard", "origin/HEAD"],
+        ):
+            proc = subprocess.run(git_args, cwd=str(src), capture_output=True, text=True, timeout=600)
+            if proc.returncode != 0:
+                return {
+                    "ok": False,
+                    "method": "source",
+                    "detail": f"git {' '.join(git_args)} failed: {proc.stderr.strip()[:300]}",
+                }
+    # Record the exact commit we build from so check() can report freshness.
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(src), capture_output=True, text=True, timeout=60)
+    src_commit = proc.stdout.strip() if proc.returncode == 0 else None
     build = src / "build"
     cmake_args = [cmake, "-S", str(src), "-B", str(build)]
     # No embedded web UI: it needs node/npm + a HF download and dominates build
@@ -636,7 +673,7 @@ def _build_from_source(backend: str) -> dict:
                 shutil.rmtree(staging, ignore_errors=True)
                 return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
             try:
-                _write_meta({"tag": "source", "method": "source", "backend": backend})
+                _write_meta({"tag": "source", "method": "source", "backend": backend, "commit": src_commit})
             except Exception as exc:
                 # restore prior install
                 shutil.rmtree(bin_dir(), ignore_errors=True)
