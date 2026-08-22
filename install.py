@@ -413,6 +413,14 @@ def _extract(archive: Path, dest: Path) -> None:
             zf.extractall(dest)
 
 
+def _find_server_dir(root: Path) -> Path | None:
+    """Locate the directory containing llama-server under root."""
+    for cur, _dirs, files in os.walk(root):
+        if "llama-server" in files or "llama-server.exe" in files:
+            return Path(cur)
+    return None
+
+
 def _install_extracted(extracted: Path, dest_bin: Path) -> Path | None:
     """Move the extracted llama.cpp tree (binaries + shared libs) into bin_dir.
 
@@ -422,11 +430,7 @@ def _install_extracted(extracted: Path, dest_bin: Path) -> Path | None:
     be installed together.
     """
     dest_bin.mkdir(parents=True, exist_ok=True)
-    server_dir: Path | None = None
-    for root, _dirs, files in os.walk(extracted):
-        if "llama-server" in files or "llama-server.exe" in files:
-            server_dir = Path(root)
-            break
+    server_dir = _find_server_dir(extracted)
     if server_dir is None:
         return None
     moved: Path | None = None
@@ -495,25 +499,41 @@ def _build_from_source(backend: str) -> dict:
     # Locate the built llama-server + its shared libs. Single-config generators
     # (Unix Makefiles / Ninja) emit into ``build/bin/``; multi-config generators
     # (Visual Studio on Windows) emit into ``build/bin/<Config>/`` (e.g. Release).
-    server_dir: Path | None = None
-    for root, _dirs, files in os.walk(str(build)):
-        if "llama-server" in files or "llama-server.exe" in files:
-            server_dir = Path(root)
-            break
+    server_dir = _find_server_dir(build)
     if server_dir is None:
         return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
-    # Clear any previous install, then install the whole dir (binary + shared libs).
-    shutil.rmtree(bin_dir(), ignore_errors=True)
-    bin_dir().mkdir(parents=True, exist_ok=True)
+    # Stage into temp dir, smoke-test, then atomically swap with bin_dir
+    staging = bin_dir().parent / f"{BIN_DIR_NAME}.tmp"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
     for item in server_dir.iterdir():
         if item.is_file():
-            shutil.copy2(item, bin_dir() / item.name)
+            shutil.copy2(item, staging / item.name)
+    cand = staging / SERVER_BIN
+    if not cand.is_file():
+        # fallback: any llama-server variant in staging
+        candidates = [p for p in staging.iterdir() if p.name.startswith("llama-server")]
+        cand = candidates[0] if candidates else None
+    if cand is None or not cand.is_file():
+        shutil.rmtree(staging, ignore_errors=True)
+        return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
+    ok2, info2 = _smoke_test(cand, timeout=20.0)
+    if not ok2:
+        shutil.rmtree(staging, ignore_errors=True)
+        return {"ok": False, "method": "source", "detail": f"built binary does not run: {info2}"}
+    # atomic swap: staging -> bin_dir
+    backup = bin_dir().parent / f"{BIN_DIR_NAME}.bak"
+    shutil.rmtree(backup, ignore_errors=True)
+    if bin_dir().exists():
+        bin_dir().rename(backup)
+    staging.rename(bin_dir())
+    shutil.rmtree(backup, ignore_errors=True)
     moved = find_binary()
     if moved is None:
+        shutil.rmtree(bin_dir(), ignore_errors=True)
+        if backup.exists():
+            backup.rename(bin_dir())
         return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
-    ok, info = _smoke_test(moved, timeout=20.0)
-    if not ok:
-        return {"ok": False, "method": "source", "detail": f"built binary does not run: {info}"}
     _write_meta({"tag": "source", "method": "source", "backend": backend})
     return {"ok": True, "method": "source", "detail": f"Built llama.cpp from source → {moved}"}
 
@@ -573,13 +593,15 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
         if archive is not None:
             with tempfile.TemporaryDirectory() as tmp:
                 _extract(archive, Path(tmp))
-                # Clear any previous (broken) install before installing fresh.
-                shutil.rmtree(bin_dir(), ignore_errors=True)
-                moved = _install_extracted(Path(tmp), bin_dir())
+                # Install into staging, smoke-test, then atomically swap
+                staging = bin_dir().parent / f"{BIN_DIR_NAME}.tmp"
+                shutil.rmtree(staging, ignore_errors=True)
+                staging.mkdir(parents=True, exist_ok=True)
+                moved = _install_extracted(Path(tmp), staging)
                 if moved:
                     ok, info = _smoke_test(moved)
                     if not ok:
-                        shutil.rmtree(bin_dir(), ignore_errors=True)
+                        shutil.rmtree(staging, ignore_errors=True)
                         return {
                             "ok": False,
                             "method": "prebuilt",
@@ -589,8 +611,17 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                                 "If this is macOS < 13.3, the prebuilt requires a newer OS."
                             ),
                         }
+                    # atomic swap staging -> bin_dir
+                    backup = bin_dir().parent / f"{BIN_DIR_NAME}.bak"
+                    shutil.rmtree(backup, ignore_errors=True)
+                    if bin_dir().exists():
+                        bin_dir().rename(backup)
+                    staging.rename(bin_dir())
+                    shutil.rmtree(backup, ignore_errors=True)
+                    final = find_binary()
                     _write_meta({"tag": tag, "method": "prebuilt", "backend": backend})
-                    return {"ok": True, "method": "prebuilt", "detail": f"Installed {tag} prebuilt → {moved}"}
+                    return {"ok": True, "method": "prebuilt", "detail": f"Installed {tag} prebuilt → {final}"}
+                shutil.rmtree(staging, ignore_errors=True)
     # No prebuilt asset for this host/backend (e.g. Linux CUDA), or the download
     # failed → source build. (A prebuilt that downloads but fails the smoke test
     # returns an explicit error above rather than silently building for minutes.)
