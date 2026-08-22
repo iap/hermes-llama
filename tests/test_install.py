@@ -33,12 +33,13 @@ install = _load_install()
 class _Platform:
     """Scoped override of install.py's platform probes (restored on exit)."""
 
-    def __init__(self, *, macos=False, windows=False, arch="x64", nvidia=False, backend_env=None):
+    def __init__(self, *, macos=False, windows=False, arch="x64", nvidia=False, backend_env=None, mac_ver=(14, 0)):
         self.macos = macos
         self.windows = windows
         self.arch = arch
         self.nvidia = nvidia
         self.backend_env = backend_env
+        self.mac_ver = mac_ver
 
     def __enter__(self):
         self._saved = {
@@ -46,12 +47,14 @@ class _Platform:
             "_is_windows": install._is_windows,
             "_arch": install._arch,
             "_nvidia_present": install._nvidia_present,
+            "_macos_ver": install._macos_ver,
             "env": os.environ.get("LLAMA_CPP_BACKEND"),
         }
         install._is_macos = lambda: self.macos
         install._is_windows = lambda: self.windows
         install._arch = lambda: self.arch
         install._nvidia_present = lambda: self.nvidia
+        install._macos_ver = lambda: self.mac_ver
         if self.backend_env is None:
             os.environ.pop("LLAMA_CPP_BACKEND", None)
         else:
@@ -63,6 +66,7 @@ class _Platform:
         install._is_windows = self._saved["_is_windows"]
         install._arch = self._saved["_arch"]
         install._nvidia_present = self._saved["_nvidia_present"]
+        install._macos_ver = self._saved["_macos_ver"]
         if self._saved["env"] is None:
             os.environ.pop("LLAMA_CPP_BACKEND", None)
         else:
@@ -75,6 +79,8 @@ def test_asset_name():
         assert install._asset_name(tag, "cpu") == "llama-b10549-bin-macos-arm64.tar.gz"
         assert install._asset_name(tag, "cuda") is None  # no macOS cuda prebuilt
         assert install._asset_name(tag, "vulkan") is None  # no macOS vulkan prebuilt
+    with _Platform(macos=True, arch="arm64", mac_ver=(12, 7)):
+        assert install._asset_name(tag, "cpu") is None  # prebuilt needs macOS 13.3+ -> source
     with _Platform(windows=True, arch="x64"):
         assert install._asset_name(tag, "cpu") == "llama-b10549-bin-win-cpu-x64.zip"
         assert install._asset_name(tag, "cuda") == "llama-b10549-bin-win-cuda-12.4-x64.zip"

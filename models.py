@@ -207,19 +207,38 @@ def pull(spec: str, alias: str | None = None) -> str:
     return f"Downloaded {repo}/{remote_file} ({size_gb} GB) → registered as '{alias}'."
 
 
+def _is_llama_server(pid: int) -> bool:
+    """Confirm a PID belongs to llama-server (guard against PID reuse)."""
+    if sys.platform == "win32":
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        return "llama-server" in out
+    except Exception:
+        return False
+
+
 def _find_loaded_server() -> int | None:
     pid_path = _server_pid_path()
     if pid_path.is_file():
         try:
             pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            return pid
         except Exception:
-            pid_path.unlink(missing_ok=True)
+            pid = None
+        if pid is not None and _is_llama_server(pid):
+            return pid
+        pid_path.unlink(missing_ok=True)
     return None
 
 
-def _wait_healthy(base: str, timeout: float = 30.0) -> bool:
+def _wait_healthy(base: str, timeout: float = 60.0) -> bool:
     """Poll ``/health`` until the server reports ready (or timeout)."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -296,7 +315,7 @@ def serve(alias: str) -> str:
         log_file.close()
     _server_pid_path().write_text(str(proc.pid), encoding="utf-8")
     base = f"http://{s['host']}:{s['port']}"
-    ready = _wait_healthy(base, timeout=30)
+    ready = _wait_healthy(base, timeout=float(_int_env("LLAMA_CPP_HEALTH_TIMEOUT", 60)))
     state = "ready" if ready else "still loading (watch `/llama status`)"
     return (
         f"Started llama-server (pid {proc.pid}) with model '{serve_alias}' on "

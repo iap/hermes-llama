@@ -97,8 +97,3 @@ def register() -> None:
     ``LLAMA_CPP_BASE_URL`` before this runs) take effect.
     """
     register_provider(LlamaCppProfile())
-
-
-# Self-register on import so the profile is available even if ``register(ctx)``
-# is never called (e.g. when loaded as a standalone model-provider plugin).
-register()

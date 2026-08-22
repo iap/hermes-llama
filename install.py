@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -67,6 +68,15 @@ def _arch() -> str:
     if machine in ("arm64", "aarch64"):
         return "arm64"
     return machine
+
+
+def _macos_ver() -> tuple[int, int]:
+    """Host macOS version as (major, minor); (0, 0) on parse failure or non-macOS."""
+    try:
+        parts = platform.mac_ver()[0].split(".")
+        return (int(parts[0]), int(parts[1]))
+    except Exception:
+        return (0, 0)
 
 
 # ── paths ────────────────────────────────────────────────────────────────────
@@ -225,6 +235,9 @@ def _asset_name(tag: str, backend: str) -> str | None:
         # macOS ships a single Metal/CPU prebuilt; no cuda/vulkan asset.
         if backend in ("cuda", "vulkan"):
             return None
+        # Prebuilt is compiled with minos 13.3; older hosts must source-build.
+        if _macos_ver() < (13, 3):
+            return None
         return f"llama-{tag}-bin-macos-{arch}.tar.gz"
     if _is_windows():
         if backend == "cuda" and arch == "x64":
@@ -245,11 +258,30 @@ def _asset_name(tag: str, backend: str) -> str | None:
 
 # ── download / extract ───────────────────────────────────────────────────────
 
+_TAG_CACHE_TTL = 600  # seconds; avoid repeated GitHub API hits within a run
+
+
 def _latest_tag() -> str | None:
+    """Return the latest llama.cpp release tag, cached briefly to avoid repeat API hits."""
+    cache = _cache_dir() / "latest_tag.json"
+    try:
+        if cache.is_file():
+            data = json.loads(cache.read_text())
+            if time.time() - float(data.get("ts", 0)) < _TAG_CACHE_TTL:
+                return data.get("tag")
+    except Exception:
+        pass
     try:
         with urllib.request.urlopen(GITHUB_API + "/releases/latest", timeout=20) as resp:
             data = json.loads(resp.read().decode())
-        return data.get("tag_name")
+        tag = data.get("tag_name")
+        if tag:
+            try:
+                _cache_dir().mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps({"tag": tag, "ts": time.time()}))
+            except Exception:
+                pass
+        return tag
     except Exception:
         return None
 
@@ -356,8 +388,9 @@ def _build_from_source(backend: str) -> dict:
     proc = subprocess.run(cmake_args, capture_output=True, text=True, timeout=900)
     if proc.returncode != 0:
         return {"ok": False, "method": "source", "detail": f"cmake configure failed: {proc.stderr.strip()[:300]}"}
+    jobs = str(min(os.cpu_count() or 2, 4))
     proc = subprocess.run(
-        [cmake, "--build", str(build), "--config", "Release", "--target", "llama-server", "-j"],
+        [cmake, "--build", str(build), "--config", "Release", "--target", "llama-server", "-j", jobs],
         capture_output=True, text=True, timeout=3600,
     )
     if proc.returncode != 0:
@@ -487,3 +520,5 @@ def _remove_plugin_artifacts() -> None:
     for sub in (BIN_DIR_NAME, SRC_DIR_NAME, CACHE_DIR_NAME):
         shutil.rmtree(install_root() / sub, ignore_errors=True)
     _meta_path().unlink(missing_ok=True)
+    (install_root() / SERVER_PID_FILE_NAME).unlink(missing_ok=True)
+    (install_root() / SERVER_LOG_FILE_NAME).unlink(missing_ok=True)
