@@ -51,6 +51,30 @@ Please follow the existing code style in the project. If a linter or formatter i
   are named module-level constants (`REPO`, `GITHUB_API`, …) so they stay obvious
   and replaceable (e.g. for mirrors).
 
+## Pinning on git CI
+
+GitHub Actions referenced in `.github/workflows/*.yml` MUST be pinned to prevent
+supply-chain attacks where a compromised upstream action could execute arbitrary
+code in CI. Pin by **immutable commit SHA** — never by mutable branch (`@main`)
+or bare major tag (`@v3`).
+
+**Convention:**
+
+- Pin to a **full 40-char commit SHA** with a trailing comment naming the version:
+  `uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1`
+- For actions that publish proper semver tags (`@v3`, `@v7.0.1`), pinning to the
+  tag is acceptable as a fallback — but SHA pinning is preferred.
+- **Never** pin to `@main`, `@master`, or bare `@v3` without a SHA.
+
+**Verify before submitting:**
+
+```bash
+cd .github/workflows && grep -rn "uses:" . | grep -vE "@[0-9a-f]{40}|# v[0-9]"
+```
+
+This flags any action referenced by mutable tag or branch. Fix by resolving the
+tag to its commit SHA via the action's GitHub release page.
+
 ## Questions?
 
 If you have any questions, feel free to open an issue and we'll be happy to help.
