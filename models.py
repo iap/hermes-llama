@@ -453,12 +453,20 @@ def stop() -> str:
         if sys.platform == "win32":
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
         else:
-            os.killpg(pid, signal.SIGTERM)
-            time.sleep(1)
             try:
-                os.killpg(pid, signal.SIGKILL)
-            except Exception:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
                 pass
+            # Poll briefly before SIGKILL; avoid killing a reused PID group.
+            for _ in range(10):
+                time.sleep(0.2)
+                if not _pid_alive(pid) or not _is_llama_server(pid):
+                    break
+            else:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except Exception:
+                    pass
     except Exception as exc:
         return f"Failed to stop pid {pid}: {exc}"
     _server_pid_path().unlink(missing_ok=True)
