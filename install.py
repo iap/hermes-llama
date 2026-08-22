@@ -41,6 +41,7 @@ BACKENDS = ("cpu", "cuda", "vulkan", "source")
 # Layout segments under install_root() — centralized so no path segment is
 # repeated as a bare string literal (see CONTRIBUTING.md "no hardcoded paths").
 DEFAULT_HERMES_DIR_NAME = ".hermes"
+WINDOWS_HERMES_DIR_NAME = "hermes"
 INSTALL_DIR_NAME = "llama-cpp"
 BIN_DIR_NAME = "bin"
 MODELS_DIR_NAME = "models"
@@ -82,7 +83,13 @@ def _macos_ver() -> tuple[int, int]:
 # ── paths ────────────────────────────────────────────────────────────────────
 
 def _hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME", str(Path.home() / DEFAULT_HERMES_DIR_NAME)))
+    override = os.environ.get("HERMES_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+        return Path(base) / WINDOWS_HERMES_DIR_NAME
+    return Path.home() / DEFAULT_HERMES_DIR_NAME
 
 
 def install_root() -> Path:
@@ -241,9 +248,11 @@ def _asset_name(tag: str, backend: str) -> str | None:
         return f"llama-{tag}-bin-macos-{arch}.tar.gz"
     if _is_windows():
         if backend == "cuda" and arch == "x64":
-            return f"llama-{tag}-bin-win-cuda-12.4-x64.zip"
+            # cudart-* bundles the CUDA runtime (self-contained, no toolkit needed);
+            # the bare llama-* CUDA build requires a separately-installed CUDA runtime.
+            return "cudart-llama-bin-win-cuda-12.4-x64.zip"
         if backend == "cuda" and arch == "arm64":
-            return f"llama-{tag}-bin-win-cuda-13.4-arm64.zip"
+            return "cudart-llama-bin-win-cuda-13.4-arm64.zip"
         if backend == "vulkan" and arch == "x64":
             return f"llama-{tag}-bin-win-vulkan-x64.zip"
         return f"llama-{tag}-bin-win-cpu-{arch}.zip"
@@ -262,7 +271,14 @@ _TAG_CACHE_TTL = 600  # seconds; avoid repeated GitHub API hits within a run
 
 
 def _latest_tag() -> str | None:
-    """Return the latest llama.cpp release tag, cached briefly to avoid repeat API hits."""
+    """Resolve the newest build-number tag that ships prebuilt binaries.
+
+    Upstream now publishes a semver "pointer" release (e.g. ``v0.2.0``) whose
+    only asset is ``nightly-tag.txt``; the real binaries live on ``bNNNN`` build
+    tags. Prefer the latest non-prerelease build tag, falling back to any build
+    tag with assets (nightly), so the primary prebuilt path resolves correctly.
+    Results are cached briefly to avoid repeated GitHub API hits within a run.
+    """
     cache = _cache_dir() / "latest_tag.json"
     try:
         if cache.is_file():
@@ -272,18 +288,35 @@ def _latest_tag() -> str | None:
     except Exception:
         pass
     try:
-        with urllib.request.urlopen(GITHUB_API + "/releases/latest", timeout=20) as resp:
-            data = json.loads(resp.read().decode())
-        tag = data.get("tag_name")
-        if tag:
-            try:
-                _cache_dir().mkdir(parents=True, exist_ok=True)
-                cache.write_text(json.dumps({"tag": tag, "ts": time.time()}))
-            except Exception:
-                pass
-        return tag
+        with urllib.request.urlopen(GITHUB_API + "/releases?per_page=30", timeout=20) as resp:
+            releases = json.loads(resp.read().decode())
     except Exception:
         return None
+    if not isinstance(releases, list):
+        return None
+
+    def _is_build(tag: str) -> bool:
+        return bool(tag) and tag[0] == "b" and tag[1:].isdigit()
+
+    tag = None
+    for rel in releases:
+        t = rel.get("tag_name")
+        if _is_build(t) and not rel.get("prerelease") and rel.get("assets"):
+            tag = t
+            break
+    if tag is None:
+        for rel in releases:
+            t = rel.get("tag_name")
+            if _is_build(t) and rel.get("assets"):
+                tag = t
+                break
+    if tag:
+        try:
+            _cache_dir().mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"tag": tag, "ts": time.time()}))
+        except Exception:
+            pass
+    return tag
 
 
 def _download(url: str, dest: Path) -> None:
@@ -444,16 +477,19 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
     existing = check()
     # Version pinning: explicit arg > LLAMA_CPP_VERSION > latest release.
     version = version or os.environ.get("LLAMA_CPP_VERSION", "").strip() or None
-    # Skip only when already working AND nothing is forcing a change.
-    if existing["installed"] and existing["runs"] and not force:
-        if version:
-            if version == existing.get("tag"):
-                return {"ok": True, "skipped": True, "detail": f"Already installed at {version}."}
-        elif existing.get("up_to_date"):
-            return {"ok": True, "skipped": True, "detail": f"Already installed and up to date: {existing['binary']}"}
-    tag = version or existing.get("latest_tag") or _latest_tag()
-    if not tag:
+    target_tag = version or existing.get("latest_tag") or _latest_tag()
+    if not target_tag:
         return {"ok": False, "detail": "Could not determine the latest release tag."}
+
+    # Skip only when the installed tag already matches the target AND it runs,
+    # unless `force` is set (used by `upgrade`).
+    if not force and existing["installed"] and existing["runs"] and existing.get("tag") == target_tag:
+        return {
+            "ok": True,
+            "skipped": True,
+            "detail": f"Already installed and working at {target_tag}: {existing['binary']}",
+        }
+    tag = target_tag
     asset = _asset_name(tag, backend)
     if asset:
         archive = _download_cached(tag, asset)
