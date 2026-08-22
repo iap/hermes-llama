@@ -583,6 +583,9 @@ def _build_from_source(backend: str) -> dict:
     # Locked, unique staging -> atomic swap with restore on any failure
     with _install_lock():
         staging, backup = _unique_names()
+        # Stop a live server before we replace its bin/ (C1): the running
+        # process may still dlopen these dylibs, so stop it first.
+        _stop_running_server_if_any()
         try:
             shutil.rmtree(staging, ignore_errors=True)
             staging.mkdir(parents=True, exist_ok=True)
@@ -710,6 +713,8 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                 # Locked unique staging -> atomic swap with restore
                 with _install_lock():
                     staging, backup = _unique_names()
+                    # Stop a live server before we replace its bin/ (C1).
+                    _stop_running_server_if_any()
                     try:
                         shutil.rmtree(staging, ignore_errors=True)
                         staging.mkdir(parents=True, exist_ok=True)
@@ -821,6 +826,29 @@ def _plugin_owned() -> bool:
     return False
 
 
+def _stop_running_server_if_any() -> None:
+    """Stop a live plugin llama-server before we mutate/delete its files (C1).
+
+    Uninstall — or a bin/ swap during install/upgrade — would otherwise orphan a
+    running server and erase the only handle to it (``server.pid``), leaving a
+    process bound to its port forever. A live server may also still lazily
+    ``dlopen`` the dylibs we are about to replace, so we stop it first.
+
+    The sibling ``models`` module is imported lazily to avoid a top-level
+    circular import (``install.py`` also loads standalone in the test harness).
+    Stopping is best-effort: if ``models`` is unavailable or ``stop()`` raises,
+    we proceed with removal regardless.
+    """
+    try:
+        from . import models  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001 — models unavailable (standalone test load)
+        return
+    try:
+        models.stop()
+    except Exception:  # noqa: BLE001 — best-effort; removal proceeds regardless
+        pass
+
+
 def _uninstall_impl() -> dict:
     # Ownership is derived from the plugin's own layout, never from PATH (M5).
     if not _plugin_owned():
@@ -828,6 +856,9 @@ def _uninstall_impl() -> dict:
         # by an aborted prior install, but report "nothing installed".
         _remove_plugin_artifacts()
         return {"ok": True, "detail": "Nothing installed; cleared plugin artifacts (models kept)."}
+    # Stop a running server before destroying its only handle (bin/ + server.pid)
+    # so we never orphan a live process bound to its port (C1).
+    _stop_running_server_if_any()
     ok, survivors = _remove_plugin_artifacts()
     if ok:
         detail = f"Removed plugin-managed llama.cpp (models kept at {models_dir()})."
