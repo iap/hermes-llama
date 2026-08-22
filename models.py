@@ -217,14 +217,22 @@ def pull(spec: str, alias: str | None = None) -> str:
     dest = _model_dest(repo, local_name)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.is_file():
-        # Re-register an existing file (repairs a lost/corrupted registry entry).
-        reg = _load_registry()
-        reg[alias] = {
-            "repo": repo, "file": local_name, "path": str(dest),
-            "size_gb": round(dest.stat().st_size / 1024**3, 2),
-        }
-        _save_registry(reg)
-        return f"Already present: {dest} (registered as '{alias}')."
+        # Guard: 0-byte/truncated files are not "present" — re-download them.
+        try:
+            sz = dest.stat().st_size
+        except Exception:
+            sz = 0
+        if sz < 1024 * 1024:  # <1 MiB is definitely truncated
+            dest.unlink(missing_ok=True)
+        else:
+            # Re-register an existing file (repairs a lost/corrupted registry entry).
+            reg = _load_registry()
+            reg[alias] = {
+                "repo": repo, "file": local_name, "path": str(dest),
+                "size_gb": round(sz / 1024**3, 2),
+            }
+            _save_registry(reg)
+            return f"Already present: {dest} (registered as '{alias}')."
     url = _hf_file_url(repo, remote_file)
     try:
         _download_model(url, dest)
@@ -312,7 +320,7 @@ def _is_llama_server(pid: int) -> bool:
         comm = Path(f"/proc/{pid}/comm")
         if comm.is_file():
             return "llama-server" in comm.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort read
         pass
     try:
         out = subprocess.run(
@@ -345,7 +353,7 @@ def _wait_healthy(base: str, timeout: float = 60.0) -> bool:
             with urllib.request.urlopen(f"{base}/health", timeout=3) as resp:
                 if resp.status == 200:
                     return True
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort read
             pass
         time.sleep(1)
     return False
@@ -425,7 +433,7 @@ def serve(alias: str) -> str:
         tail = ""
         try:
             tail = log_path.read_text(encoding="utf-8", errors="replace")[-300:].strip()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort read
             pass
         return f"llama-server exited immediately (exit {code}). {tail}"
     base = f"http://{s['host']}:{s['port']}"
@@ -445,12 +453,20 @@ def stop() -> str:
         if sys.platform == "win32":
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
         else:
-            os.killpg(pid, signal.SIGTERM)
-            time.sleep(1)
             try:
-                os.killpg(pid, signal.SIGKILL)
-            except Exception:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:  # noqa: BLE001 — PID already gone
                 pass
+            # Poll briefly before SIGKILL; avoid killing a reused PID group.
+            for _ in range(10):
+                time.sleep(0.2)
+                if not _pid_alive(pid) or not _is_llama_server(pid):
+                    break
+            else:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except Exception:  # noqa: BLE001 — PID already gone or reused
+                    pass
     except Exception as exc:
         return f"Failed to stop pid {pid}: {exc}"
     _server_pid_path().unlink(missing_ok=True)

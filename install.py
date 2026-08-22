@@ -27,8 +27,10 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+import uuid
 import zipfile
 from pathlib import Path
+from contextlib import contextmanager
 
 REPO = "ggml-org/llama.cpp"
 # Endpoints — env-overridable for GitHub Enterprise / HF mirror deployments.
@@ -60,6 +62,61 @@ def _is_windows() -> bool:
 
 def _is_macos() -> bool:
     return sys.platform == "darwin"
+
+
+@contextmanager
+def _install_lock():
+    """Interprocess lock for install root, stdlib-only (fcntl/msvcrt)."""
+    lock_path = install_root() / ".install.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = None
+    try:
+        fh = open(lock_path, "a+")
+        if sys.platform == "win32":
+            import msvcrt
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                # fallback: blocking
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                except OSError as exc:
+                    fh.close()
+                    raise RuntimeError(f"install lock failed: {exc}") from exc
+        else:
+            try:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except Exception as exc:
+                fh.close()
+                raise RuntimeError(f"install lock failed: {exc}") from exc
+        yield
+    finally:
+        if fh is not None:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    try:
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    except Exception:  # noqa: BLE001 — best-effort unlock, file closed below anyway
+                        pass
+                else:
+                    try:
+                        import fcntl
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    except Exception:  # noqa: BLE001 — best-effort unlock, file closed below anyway
+                        pass
+            finally:
+                try:
+                    fh.close()
+                except Exception:  # noqa: BLE001 — best-effort close
+                    pass
+
+
+def _unique_names() -> tuple[Path, Path]:
+    suf = f".{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    return install_root() / f"{BIN_DIR_NAME}.tmp{suf}", install_root() / f"{BIN_DIR_NAME}.bak{suf}"
 
 
 def _arch() -> str:
@@ -170,10 +227,10 @@ def _smoke_test(binary: Path, timeout: float = 8.0) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def check() -> dict:
+def check(*, fetch_latest: bool = True) -> dict:
     """Return install status incl. version, runs flag, and upgrade hint. Never raises."""
     try:
-        return _check_impl()
+        return _check_impl(fetch_latest=fetch_latest)
     except Exception as exc:  # noqa: BLE001
         return {
             "installed": False, "binary": None, "version": None, "runs": False,
@@ -182,7 +239,7 @@ def check() -> dict:
         }
 
 
-def _check_impl() -> dict:
+def _check_impl(*, fetch_latest: bool = True) -> dict:
     result = {
         "installed": False,
         "binary": None,
@@ -193,7 +250,18 @@ def _check_impl() -> dict:
         "up_to_date": None,
     }
     binary = find_binary()
-    latest = _latest_tag()
+    latest = _latest_tag() if fetch_latest else None
+    # If fetch suppressed, try cache without network
+    if not fetch_latest:
+        try:
+            cache = _cache_dir() / "latest_tag.json"
+            if cache.is_file():
+                import json as _json, time as _time
+                data = _json.loads(cache.read_text())
+                if _time.time() - float(data.get("ts", 0)) < _TAG_CACHE_TTL:
+                    latest = data.get("tag")
+        except Exception:  # noqa: BLE001 — cache miss is fine, network fetch follows
+            pass
     result["latest_tag"] = latest
     if binary is None:
         return result
@@ -308,14 +376,40 @@ def _latest_tag() -> str | None:
             data = json.loads(cache.read_text())
             if time.time() - float(data.get("ts", 0)) < _TAG_CACHE_TTL:
                 return data.get("tag")
-    except Exception:
+    except Exception:  # noqa: BLE001 — cache miss is fine, network fetch follows
         pass
-    try:
-        with urllib.request.urlopen(GITHUB_API + "/releases?per_page=30", timeout=20) as resp:
-            releases = json.loads(resp.read().decode())
-    except Exception:
-        return None
-    if not isinstance(releases, list):
+    # Paginated fetch: per_page=100 and follow Link rel=next (up to 3 pages)
+    # so a burst of nightly prereleases cannot push the first stable
+    # bNNNN off the first page (previously per_page=30, single page).
+    releases_all: list[dict] = []
+    url = GITHUB_API + "/releases?per_page=100"
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=20) as resp:
+                page = json.loads(resp.read().decode())
+                if not isinstance(page, list):
+                    break
+                releases_all.extend(page)
+                link = resp.headers.get("Link", "") if hasattr(resp, "headers") else ""
+                nxt = None
+                if link:
+                    for part in link.split(","):
+                        if 'rel="next"' in part:
+                            s = part.find("<")
+                            e = part.find(">")
+                            if s != -1 and e != -1:
+                                nxt = part[s + 1:e]
+                                break
+                if nxt:
+                    url = nxt
+                    continue
+                break
+        except Exception:
+            if releases_all:
+                break
+            return None
+    releases = releases_all
+    if not releases:
         return None
 
     tag = None
@@ -334,7 +428,7 @@ def _latest_tag() -> str | None:
         try:
             _cache_dir().mkdir(parents=True, exist_ok=True)
             cache.write_text(json.dumps({"tag": tag, "ts": time.time()}))
-        except Exception:
+        except Exception:  # noqa: BLE001 — cache write failure is non-fatal
             pass
     return tag
 
@@ -387,6 +481,14 @@ def _extract(archive: Path, dest: Path) -> None:
             zf.extractall(dest)
 
 
+def _find_server_dir(root: Path) -> Path | None:
+    """Locate the directory containing llama-server under root."""
+    for cur, _dirs, files in os.walk(root):
+        if "llama-server" in files or "llama-server.exe" in files:
+            return Path(cur)
+    return None
+
+
 def _install_extracted(extracted: Path, dest_bin: Path) -> Path | None:
     """Move the extracted llama.cpp tree (binaries + shared libs) into bin_dir.
 
@@ -396,11 +498,7 @@ def _install_extracted(extracted: Path, dest_bin: Path) -> Path | None:
     be installed together.
     """
     dest_bin.mkdir(parents=True, exist_ok=True)
-    server_dir: Path | None = None
-    for root, _dirs, files in os.walk(extracted):
-        if "llama-server" in files or "llama-server.exe" in files:
-            server_dir = Path(root)
-            break
+    server_dir = _find_server_dir(extracted)
     if server_dir is None:
         return None
     moved: Path | None = None
@@ -469,27 +567,85 @@ def _build_from_source(backend: str) -> dict:
     # Locate the built llama-server + its shared libs. Single-config generators
     # (Unix Makefiles / Ninja) emit into ``build/bin/``; multi-config generators
     # (Visual Studio on Windows) emit into ``build/bin/<Config>/`` (e.g. Release).
-    server_dir: Path | None = None
-    for root, _dirs, files in os.walk(str(build)):
-        if "llama-server" in files or "llama-server.exe" in files:
-            server_dir = Path(root)
-            break
+    server_dir = _find_server_dir(build)
     if server_dir is None:
         return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
-    # Clear any previous install, then install the whole dir (binary + shared libs).
-    shutil.rmtree(bin_dir(), ignore_errors=True)
-    bin_dir().mkdir(parents=True, exist_ok=True)
-    for item in server_dir.iterdir():
-        if item.is_file():
-            shutil.copy2(item, bin_dir() / item.name)
-    moved = find_binary()
-    if moved is None:
-        return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
-    ok, info = _smoke_test(moved, timeout=20.0)
-    if not ok:
-        return {"ok": False, "method": "source", "detail": f"built binary does not run: {info}"}
-    _write_meta({"tag": "source", "method": "source", "backend": backend})
-    return {"ok": True, "method": "source", "detail": f"Built llama.cpp from source → {moved}"}
+    # Locked, unique staging -> atomic swap with restore on any failure
+    with _install_lock():
+        staging, backup = _unique_names()
+        try:
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(parents=True, exist_ok=True)
+            for item in server_dir.iterdir():
+                if item.is_file():
+                    shutil.copy2(item, staging / item.name)
+            cand = staging / SERVER_BIN
+            if not cand.is_file():
+                candidates = [p for p in staging.iterdir() if p.name.startswith("llama-server")]
+                cand = candidates[0] if candidates else None
+            if cand is None or not cand.is_file():
+                shutil.rmtree(staging, ignore_errors=True)
+                return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
+            ok2, info2 = _smoke_test(cand, timeout=20.0)
+            if not ok2:
+                shutil.rmtree(staging, ignore_errors=True)
+                return {"ok": False, "method": "source", "detail": f"built binary does not run: {info2}"}
+            shutil.rmtree(backup, ignore_errors=True)
+            swapped = False
+            if bin_dir().exists():
+                try:
+                    bin_dir().rename(backup)
+                    swapped = True
+                except Exception:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    return {"ok": False, "method": "source", "detail": "failed to backup existing bin"}
+            try:
+                staging.rename(bin_dir())
+            except Exception as exc:
+                if swapped and backup.exists():
+                    try:
+                        # restore
+                        if bin_dir().exists():
+                            shutil.rmtree(bin_dir(), ignore_errors=True)
+                        backup.rename(bin_dir())
+                    except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
+                        pass
+                shutil.rmtree(staging, ignore_errors=True)
+                return {"ok": False, "method": "source", "detail": f"swap failed: {exc}"}
+            # metadata must succeed or restore
+            moved = find_binary()
+            if moved is None:
+                # swap succeeded but binary not found -> restore
+                shutil.rmtree(bin_dir(), ignore_errors=True)
+                if backup.exists():
+                    try:
+                        backup.rename(bin_dir())
+                    except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
+                        pass
+                shutil.rmtree(staging, ignore_errors=True)
+                return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
+            try:
+                _write_meta({"tag": "source", "method": "source", "backend": backend})
+            except Exception as exc:
+                # restore prior install
+                shutil.rmtree(bin_dir(), ignore_errors=True)
+                if backup.exists():
+                    try:
+                        backup.rename(bin_dir())
+                    except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
+                        pass
+                shutil.rmtree(staging, ignore_errors=True)
+                return {"ok": False, "method": "source", "detail": f"metadata write failed: {exc}"}
+            shutil.rmtree(backup, ignore_errors=True)
+            shutil.rmtree(staging, ignore_errors=True)
+            return {"ok": True, "method": "source", "detail": f"Built llama.cpp from source → {moved}"}
+        finally:
+            # best-effort cleanup of this transaction's temp dirs
+            try:
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
+            except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
+                pass
 
 
 # ── install / uninstall / upgrade ────────────────────────────────────────────
@@ -547,24 +703,79 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
         if archive is not None:
             with tempfile.TemporaryDirectory() as tmp:
                 _extract(archive, Path(tmp))
-                # Clear any previous (broken) install before installing fresh.
-                shutil.rmtree(bin_dir(), ignore_errors=True)
-                moved = _install_extracted(Path(tmp), bin_dir())
-                if moved:
-                    ok, info = _smoke_test(moved)
-                    if not ok:
-                        shutil.rmtree(bin_dir(), ignore_errors=True)
-                        return {
-                            "ok": False,
-                            "method": "prebuilt",
-                            "detail": (
-                                f"Downloaded {tag}, but the binary does not run here "
-                                f"({info}). Falling back to a source build is recommended. "
-                                "If this is macOS < 13.3, the prebuilt requires a newer OS."
-                            ),
-                        }
-                    _write_meta({"tag": tag, "method": "prebuilt", "backend": backend})
-                    return {"ok": True, "method": "prebuilt", "detail": f"Installed {tag} prebuilt → {moved}"}
+                # Locked unique staging -> atomic swap with restore
+                with _install_lock():
+                    staging, backup = _unique_names()
+                    try:
+                        shutil.rmtree(staging, ignore_errors=True)
+                        staging.mkdir(parents=True, exist_ok=True)
+                        moved = _install_extracted(Path(tmp), staging)
+                        if not moved:
+                            shutil.rmtree(staging, ignore_errors=True)
+                            return {"ok": False, "method": "prebuilt", "detail": f"extract failed for {tag}"}
+                        ok, info = _smoke_test(moved)
+                        if not ok:
+                            shutil.rmtree(staging, ignore_errors=True)
+                            return {
+                                "ok": False,
+                                "method": "prebuilt",
+                                "detail": (
+                                    f"Downloaded {tag}, but the binary does not run here "
+                                    f"({info}). Falling back to a source build is recommended. "
+                                    "If this is macOS < 13.3, the prebuilt requires a newer OS."
+                                ),
+                            }
+                        shutil.rmtree(backup, ignore_errors=True)
+                        swapped = False
+                        if bin_dir().exists():
+                            try:
+                                bin_dir().rename(backup)
+                                swapped = True
+                            except Exception:
+                                shutil.rmtree(staging, ignore_errors=True)
+                                return {"ok": False, "method": "prebuilt", "detail": "failed to backup existing bin"}
+                        try:
+                            staging.rename(bin_dir())
+                        except Exception as exc:
+                            if swapped and backup.exists():
+                                try:
+                                    if bin_dir().exists():
+                                        shutil.rmtree(bin_dir(), ignore_errors=True)
+                                    backup.rename(bin_dir())
+                                except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
+                                    pass
+                            shutil.rmtree(staging, ignore_errors=True)
+                            return {"ok": False, "method": "prebuilt", "detail": f"swap failed: {exc}"}
+                        final = find_binary()
+                        if final is None:
+                            shutil.rmtree(bin_dir(), ignore_errors=True)
+                            if backup.exists():
+                                try:
+                                    backup.rename(bin_dir())
+                                except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
+                                    pass
+                            shutil.rmtree(staging, ignore_errors=True)
+                            return {"ok": False, "method": "prebuilt", "detail": "installed but binary not found after swap"}
+                        try:
+                            _write_meta({"tag": tag, "method": "prebuilt", "backend": backend})
+                        except Exception as exc:
+                            shutil.rmtree(bin_dir(), ignore_errors=True)
+                            if backup.exists():
+                                try:
+                                    backup.rename(bin_dir())
+                                except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
+                                    pass
+                            shutil.rmtree(staging, ignore_errors=True)
+                            return {"ok": False, "method": "prebuilt", "detail": f"metadata write failed: {exc}"}
+                        shutil.rmtree(backup, ignore_errors=True)
+                        shutil.rmtree(staging, ignore_errors=True)
+                        return {"ok": True, "method": "prebuilt", "detail": f"Installed {tag} prebuilt → {final}"}
+                    finally:
+                        try:
+                            if staging.exists():
+                                shutil.rmtree(staging, ignore_errors=True)
+                        except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
+                            pass
     # No prebuilt asset for this host/backend (e.g. Linux CUDA), or the download
     # failed → source build. (A prebuilt that downloads but fails the smoke test
     # returns an explicit error above rather than silently building for minutes.)
@@ -584,7 +795,8 @@ def uninstall() -> dict:
     survive uninstall.
     """
     try:
-        return _uninstall_impl()
+        with _install_lock():
+            return _uninstall_impl()
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "detail": f"Uninstall failed: {exc}"}
 
@@ -606,6 +818,16 @@ def _uninstall_impl() -> dict:
 def _remove_plugin_artifacts() -> None:
     for sub in (BIN_DIR_NAME, SRC_DIR_NAME, CACHE_DIR_NAME):
         shutil.rmtree(install_root() / sub, ignore_errors=True)
+    # purge leftover atomic-swap temps (do not touch lock file while locked)
+    for pat in (f"{BIN_DIR_NAME}.tmp*", f"{BIN_DIR_NAME}.bak*"):
+        for p in install_root().glob(pat):
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    p.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
+                pass
     _meta_path().unlink(missing_ok=True)
     (install_root() / SERVER_PID_FILE_NAME).unlink(missing_ok=True)
     (install_root() / SERVER_LOG_FILE_NAME).unlink(missing_ok=True)

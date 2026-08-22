@@ -52,8 +52,8 @@ levels follow the review convention: **High** (≥2 independent sources),
 2. **Correction:** `_pick_gguf_file` must skip `-hip-optimized` builds (AMD GPU)
    when choosing a default CPU file.
 3. Org/URL must be `ggml-org` (not `ggerganov`); branch `master` (not `main`).
-4. Prebuilt tags are build numbers (`b10516`), not semver — asset URL must use the
-   live `releases/latest` tag, which the installer resolves dynamically.
+4. Prebuilt tags are build numbers (`b10516`), not semver — asset URL uses the
+   live paginated releases list (`per_page=100` + Link `next`), filtering the newest `bNNNN`.
 
 ## Gaps
 
