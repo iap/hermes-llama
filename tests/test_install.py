@@ -315,50 +315,64 @@ def test_uninstall_removes_artifacts_on_py311():
 
 
 def test_stop_loaded_server_confirms_shutdown():
-    """_stop_loaded_server() only reports True when shutdown is confirmed.
+    """_stop_loaded_server() only reports True when the PROCESS is gone.
 
-    Regression for the ignored stop() failure string: a failed stop must yield
-    False so callers abort instead of deleting bin/ under a live server. The
-    ImportError path (standalone module load) counts as nothing-loaded so
-    uninstall stays usable as the recovery tool.
+    Regression for the ignored stop() failure: a failed stop must yield False so
+    callers abort instead of deleting bin/ under a live server. Confirmation must
+    not use _find_loaded_server(), because stop() unlinks the pid file even when
+    the kill failed. The ImportError path (standalone module load) counts as
+    nothing-loaded so uninstall stays usable as the recovery tool.
     """
     saved = install._stop_loaded_server
 
     class _StubModels:
-        pass
+        def __init__(self, pid, *, alive_after, is_server_after=True, stop_raises=False):
+            self._pid = pid
+            self._alive_after = alive_after
+            self._is_server_after = is_server_after
+            self._stop_raises = stop_raises
+            self.stop_calls = 0
 
-    def _make(find_results, stop_result=None):
-        stub = _StubModels()
-        calls = {"stop": 0}
-        stub._find_loaded_server = lambda: find_results.pop(0) if find_results else None
-        stub.stop = lambda: calls.__setitem__("stop", calls["stop"] + 1) or (stop_result or "")
-        return stub, calls
+        def _find_loaded_server(self):
+            return self._pid
+
+        def stop(self):
+            self.stop_calls += 1
+            if self._stop_raises:
+                raise RuntimeError("kill failed")
+            return "Stopped."
+
+        # Process-level probes: unaffected by stop() unlinking the pid file.
+        def _pid_alive(self, pid):
+            assert pid == self._pid
+            return self._alive_after
+
+        def _is_llama_server(self, pid):
+            return self._is_server_after
 
     try:
         # No loaded server -> True without calling stop().
-        stub, calls = _make([])
+        stub = _StubModels(None, alive_after=False)
         assert install._stop_loaded_server(models_module=stub) is True
-        assert calls["stop"] == 0
+        assert stub.stop_calls == 0
 
-        # Loaded -> stopped -> gone: True, stop called once.
-        stub, calls = _make([1234], stop_result="Stopped llama-server (pid 1234).")
+        # Loaded -> stopped -> process gone: True.
+        stub = _StubModels(1234, alive_after=False)
         assert install._stop_loaded_server(models_module=stub) is True
-        assert calls["stop"] == 1
+        assert stub.stop_calls == 1
 
-        # Loaded -> stop called -> still alive: False (must abort removal).
-        still_alive = [1234, 1234]
-        stub, calls = _make(still_alive)
+        # Loaded -> stop() ran but process STILL ALIVE: False (must abort).
+        # This is the case a _find_loaded_server()-based check would miss.
+        stub = _StubModels(1234, alive_after=True)
         assert install._stop_loaded_server(models_module=stub) is False
 
+        # Still alive but PID reused by another program -> not our server: True.
+        stub = _StubModels(1234, alive_after=True, is_server_after=False)
+        assert install._stop_loaded_server(models_module=stub) is True
+
         # Loaded -> stop raises: False.
-        broken = _StubModels()
-        broken._find_loaded_server = lambda: 1234
-
-        def _boom():
-            raise RuntimeError("kill failed")
-
-        broken.stop = _boom
-        assert install._stop_loaded_server(models_module=broken) is False
+        stub = _StubModels(1234, alive_after=True, stop_raises=True)
+        assert install._stop_loaded_server(models_module=stub) is False
     finally:
         install._stop_loaded_server = saved
 
@@ -376,11 +390,19 @@ def test_uninstall_aborts_when_stop_fails():
         class _FailingModels:
             @staticmethod
             def _find_loaded_server():
-                return 4321  # always alive
+                return 4321
 
             @staticmethod
             def stop():
                 return "Failed to stop pid 4321: simulated"
+
+            @staticmethod
+            def _pid_alive(pid):
+                return True  # process survives the stop attempt
+
+            @staticmethod
+            def _is_llama_server(pid):
+                return True
 
         saved_stop = install._stop_loaded_server
         install._stop_loaded_server = lambda models_module=None: saved_stop(_FailingModels)

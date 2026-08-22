@@ -902,10 +902,14 @@ def _stop_loaded_server(models_module=None) -> bool:
             return True
         models_module = _models
     try:
-        if models_module._find_loaded_server() is None:
+        pid = models_module._find_loaded_server()
+        if pid is None:
             return True
         models_module.stop()
-        return models_module._find_loaded_server() is None
+        # Confirm against the PROCESS, not the PID file: stop() unlinks the pid
+        # file even when the kill did not take effect, so _find_loaded_server()
+        # would report "gone" for a server that is still running.
+        return not (models_module._pid_alive(pid) and models_module._is_llama_server(pid))
     except Exception:  # noqa: BLE001 — shutdown could not be confirmed
         return False
 
