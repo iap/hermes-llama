@@ -205,8 +205,12 @@ def _check_impl() -> dict:
     meta = _read_meta()
     result["tag"] = meta.get("tag")
     result["backend"] = meta.get("backend")
-    result["method"] = meta.get("method")
-    if meta.get("method") == "source":
+    method = meta.get("method")
+    # Backward-compat: pre-`method` meta files recorded source builds as tag="source".
+    if method is None and meta.get("tag") == "source":
+        method = "source"
+    result["method"] = method
+    if method == "source":
         result["up_to_date"] = True  # source builds are always built from latest master
     else:
         result["up_to_date"] = (result["tag"] == latest) if (result["tag"] and latest) else None
