@@ -1,5 +1,4 @@
 name: CodeQL
-
 on:
   push:
     branches: [master]
@@ -7,10 +6,8 @@ on:
     branches: [master]
   schedule:
     - cron: "0 6 * * 1"
-
 permissions:
   contents: read
-
 jobs:
   analyze:
     name: Analyze (python)
@@ -19,21 +16,17 @@ jobs:
       contents: read
       security-events: write
       actions: read
-
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
+        uses: actions/checkout@v4
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@949a2dd6aedbaeaf7f59ac132aeb09d3aeb07f0a80 # v3.29.6
+        uses: github/codeql-action/init@v3
         with:
           languages: python
           queries: security-and-quality
-
       - name: Autobuild
-        uses: github/codeql-action/autobuild@949a2dd6aedbaeaf7f59ac132aeb09d3aeb07f0a80 # v3.29.6
-
+        uses: github/codeql-action/autobuild@v3
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@949a2dd6aedbaeaf7f59ac132aeb09d3aeb07f0a80 # v3.29.6
+        uses: github/codeql-action/analyze@v3
         with:
           category: "/language:python"
