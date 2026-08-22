@@ -1,0 +1,10 @@
+# High-signal lint rule set so CI stays green while still catching real bugs
+# (undefined names, unused imports).
+#
+# E9 = runtime errors (e.g. undefined name); F = pyflakes (unused imports, etc.).
+# The plugin's "never raises" design intentionally uses broad `except Exception`
+# and `subprocess.run(...)` without `check`, so bugbear/pylint/bandit rules are off.
+target-version = "py310"
+
+[lint]
+select = ["E9", "F"]

@@ -1,0 +1,61 @@
+name: hermes-llama
+version: 0.1.0
+description: >-
+  Check, install, and uninstall llama.cpp across macOS / Windows / Linux without
+  any package manager (official prebuilt binaries + CMake source build), and run
+  local GGUF models (LiquidAI sample included) under the "Llama CPP" provider.
+  Models loaded in llama-server appear in the local model list.
+manifest_version: 1
+api_version: 1
+license: MIT
+homepage: https://github.com/iap/hermes-llama
+tags: [llama-cpp, local-models, gguf, inference, liquidai]
+python_dependencies: []
+# No `capabilities:` block = zero privileged host capabilities. This plugin runs
+# its own subprocess commands (llama-server, package managers) as trusted Python,
+# exactly like the bundled disk-cleanup / plugin utils do.
+config_schema:
+  base_url:
+    type: str
+    default: "http://127.0.0.1:8080/v1"
+    description: "OpenAI-compatible base URL of the local llama-server (provider 'Llama CPP')."
+  api_key:
+    type: str
+    default: ""
+    description: "Optional bearer key, only if llama-server was started with --api-key."
+  host:
+    type: str
+    default: "127.0.0.1"
+    description: "Bind host for llama-server (loopback by default; use 0.0.0.0 only if you know the risk)."
+  port:
+    type: int
+    default: 8080
+    description: "Port for llama-server."
+  ctx_size:
+    type: int
+    default: 2048
+    description: "Default context size (tokens) passed to llama-server --ctx-size."
+  n_gpu_layers:
+    type: int
+    default: 0
+    description: "GPU layers to offload (0 = CPU-only, safe default)."
+  parallel:
+    type: int
+    default: 1
+    description: "Number of parallel request slots (--parallel)."
+  install_dir:
+    type: str
+    default: ""
+    description: "Root directory for plugin-managed llama.cpp (bin/src/cache). Empty = auto ($HERMES_HOME/llama-cpp)."
+  backend:
+    type: str
+    default: "auto"
+    description: "Compute backend: auto|cpu|cuda|vulkan|source. 'auto' detects NVIDIA on Windows, else CPU."
+  version:
+    type: str
+    default: ""
+    description: "Pin a llama.cpp release tag (e.g. b10549). Empty = latest."
+  models_dir:
+    type: str
+    default: ""
+    description: "Directory where GGUF models are stored. Empty = auto ($HERMES_HOME/llama-cpp/models)."

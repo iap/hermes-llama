@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & discussions
+    url: https://github.com/iap/hermes-llama/discussions
+    about: Please ask usage questions here instead of opening an issue.
