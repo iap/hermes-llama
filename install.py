@@ -601,6 +601,7 @@ def _build_from_source(backend: str) -> dict:
                 shutil.rmtree(staging, ignore_errors=True)
                 return {"ok": False, "method": "source", "detail": f"built binary does not run: {info2}"}
             shutil.rmtree(backup, ignore_errors=True)
+            _stop_loaded_server()  # never swap bin/ out from under a live server
             swapped = False
             if bin_dir().exists():
                 try:
@@ -730,6 +731,7 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                                 ),
                             }
                         shutil.rmtree(backup, ignore_errors=True)
+                        _stop_loaded_server()  # never swap bin/ out from under a live server
                         swapped = False
                         if bin_dir().exists():
                             try:
@@ -791,6 +793,29 @@ def upgrade(backend: str | None = None) -> dict:
     return install(backend=backend, force=True)
 
 
+def _stop_loaded_server() -> bool:
+    """Stop a running llama-server if one is currently loaded.
+
+    Used by uninstall and the atomic-swap paths so we never remove ``bin/`` out
+    from under a live server (which would leave a dangling, unkillable process).
+
+    Lazy-imports the sibling ``models`` module (relative import fails when this
+    file is loaded standalone, e.g. by the test harness) and swallows any
+    import/runtime error so callers can never raise.
+    """
+    try:
+        from . import models as _models
+    except ImportError:
+        return False
+    try:
+        if _models._find_loaded_server() is None:
+            return False
+        _models.stop()
+    except Exception:  # noqa: BLE001 — best-effort interlock, never block a swap
+        return False
+    return True
+
+
 def uninstall() -> dict:
     """Remove the plugin-managed llama.cpp install. Never raises.
 
@@ -812,6 +837,7 @@ def _uninstall_impl() -> dict:
     # user also has) must not make us refuse to manage our own install.
     ours = (bin_dir() / SERVER_BIN).is_file() or _meta_path().is_file()
     if ours:
+        _stop_loaded_server()  # never remove bin/ out from under a live server
         survivors = _remove_plugin_artifacts()
         # Final integrity check: the bin dir must actually be gone.
         if bin_dir().exists():
