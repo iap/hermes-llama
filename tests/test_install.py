@@ -83,7 +83,7 @@ def test_asset_name():
         assert install._asset_name(tag, "cpu") is None  # prebuilt needs macOS 13.3+ -> source
     with _Platform(windows=True, arch="x64"):
         assert install._asset_name(tag, "cpu") == "llama-b10549-bin-win-cpu-x64.zip"
-        assert install._asset_name(tag, "cuda") == "llama-b10549-bin-win-cuda-12.4-x64.zip"
+        assert install._asset_name(tag, "cuda") == "cudart-llama-bin-win-cuda-12.4-x64.zip"
         assert install._asset_name(tag, "vulkan") == "llama-b10549-bin-win-vulkan-x64.zip"
     with _Platform(arch="x64"):  # Linux / other POSIX
         assert install._asset_name(tag, "cpu") == "llama-b10549-bin-ubuntu-x64.tar.gz"
@@ -112,6 +112,56 @@ def test_resolve_backend():
     with _Platform(windows=True, nvidia=True):
         assert install.resolve_backend() == "cuda"
         assert install.resolve_backend("auto") == "cuda"
+
+
+def test_install_skips_only_on_matching_tag():
+    """install() skips only when the installed tag matches the target.
+
+    Regression for the upgrade no-op bug: previously install() short-circuited
+    on ANY working install, so `upgrade` never applied a newer release.
+    """
+    saved = (install.check, install._download_cached)
+    try:
+        install.check = lambda: {
+            "installed": True, "binary": "b", "version": "v", "runs": True,
+            "tag": "b10549", "latest_tag": "b10549", "up_to_date": True,
+        }
+
+        def _fail_download(*_a, **_k):
+            raise AssertionError("must not re-download when the tag already matches")
+
+        install._download_cached = _fail_download
+        r = install.install(backend="cpu")
+        assert r.get("skipped") is True, r
+    finally:
+        install.check, install._download_cached = saved
+
+
+def test_install_upgrades_when_tag_differs():
+    """install() proceeds to download when the installed tag != target.
+
+    Regression for the upgrade no-op bug: a newer release (or the version pin)
+    must not be skipped just because the binary already runs.
+    """
+    saved = (install.check, install._download_cached, install._build_from_source)
+    calls = {}
+    try:
+        install.check = lambda: {
+            "installed": True, "binary": "b", "version": "v", "runs": True,
+            "tag": "b10540", "latest_tag": "b10549", "up_to_date": False,
+        }
+
+        def _record(tag, asset):
+            calls["tag"] = tag
+            return None  # simulate a failed download -> source-build path
+
+        install._download_cached = _record
+        install._build_from_source = lambda backend: {"ok": False, "method": "source", "detail": "stub"}
+        r = install.install(backend="cpu")
+        assert calls.get("tag") == "b10549", calls
+        assert r.get("skipped") is not True, r
+    finally:
+        install.check, install._download_cached, install._build_from_source = saved
 
 
 def main() -> int:

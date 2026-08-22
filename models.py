@@ -163,6 +163,36 @@ def _pick_gguf_file(repo: str) -> str | None:
         return None
 
 
+def _download_model(url: str, dest: Path) -> None:
+    """Download a model file robustly.
+
+    Prefers ``curl`` when available because Python's ``urllib`` can stall for
+    minutes before the first byte arrives against Hugging Face's Xet CDN
+    (``us.aws.cdn.hf.co``) redirects. ``curl`` starts the transfer immediately.
+    Falls back to ``urllib`` when ``curl`` is absent. Raises on failure.
+    """
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    curl = shutil.which("curl")
+    try:
+        if curl:
+            proc = subprocess.run(
+                [curl, "-L", "--fail", "--retry", "3", "--retry-delay", "2",
+                 "-A", "hermes-llama", "-o", str(tmp), url],
+                capture_output=True, text=True, timeout=3600,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]}")
+            os.replace(tmp, dest)
+            return
+        req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
+        with urllib.request.urlopen(req, timeout=3600) as resp, open(tmp, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        os.replace(tmp, dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def pull(spec: str, alias: str | None = None) -> str:
     """Download a GGUF model into the plugin models dir and register it."""
     resolved = _resolve_model(spec)
@@ -191,14 +221,9 @@ def pull(spec: str, alias: str | None = None) -> str:
         _save_registry(reg)
         return f"Already present: {dest} (registered as '{alias}')."
     url = _hf_file_url(repo, remote_file)
-    tmp = dest.with_suffix(dest.suffix + ".part")
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
-        with urllib.request.urlopen(req, timeout=3600) as resp, open(tmp, "wb") as out:
-            shutil.copyfileobj(resp, out)
-        os.replace(tmp, dest)
+        _download_model(url, dest)
     except Exception as exc:
-        tmp.unlink(missing_ok=True)
         return f"Download failed: {exc}"
     size_gb = round(dest.stat().st_size / 1024**3, 2)
     reg = _load_registry()
@@ -207,14 +232,48 @@ def pull(spec: str, alias: str | None = None) -> str:
     return f"Downloaded {repo}/{remote_file} ({size_gb} GB) → registered as '{alias}'."
 
 
-def _is_llama_server(pid: int) -> bool:
-    """Confirm a PID belongs to llama-server (guard against PID reuse)."""
-    if sys.platform == "win32":
+def _pid_alive(pid: int) -> bool:
+    """Return True if the given PID is a live process.
+
+    ``os.kill(pid, 0)`` is the POSIX existence probe, but on Windows it raises
+    ``OSError(22, 'The parameter is incorrect')`` for processes launched with
+    ``CREATE_NEW_PROCESS_GROUP`` (our llama-server). Use ``OpenProcess`` +
+    ``GetExitCodeProcess`` there, which is the correct liveness check.
+    """
+    if sys.platform != "win32":
         try:
             os.kill(pid, 0)
             return True
         except Exception:
             return False
+    import ctypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_bool
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    code = ctypes.c_ulong()
+    alive = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+    kernel32.CloseHandle(handle)
+    return bool(alive) and code.value == STILL_ACTIVE
+
+
+def _is_llama_server(pid: int) -> bool:
+    """Confirm a PID belongs to llama-server (guard against PID reuse).
+
+    On POSIX we read the process comm name via ``ps``; on Windows the process
+    name is not cheaply available, so we defer to ``_pid_alive`` (liveness)
+    plus the pid file written by ``serve()``.
+    """
+    if sys.platform == "win32":
+        return True
     try:
         out = subprocess.run(
             ["ps", "-p", str(pid), "-o", "comm="],
@@ -232,7 +291,7 @@ def _find_loaded_server() -> int | None:
             pid = int(pid_path.read_text().strip())
         except Exception:
             pid = None
-        if pid is not None and _is_llama_server(pid):
+        if pid is not None and _pid_alive(pid) and _is_llama_server(pid):
             return pid
         pid_path.unlink(missing_ok=True)
     return None
