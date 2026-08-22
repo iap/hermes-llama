@@ -469,15 +469,17 @@ def _extract(archive: Path, dest: Path) -> None:
             try:
                 tf.extractall(dest, filter='data')
             except TypeError:
-                # Python < 3.12: filter= not supported. Validate manually.
-                # Reject traversal AND symlinks/hardlinks to prevent containment bypass.
+                # Python < 3.12: filter= not supported. Validate and extract manually.
+                # Reject all non-regular/non-dir members and validate containment
+                # before each extract to prevent symlink/hardlink bypass, traversal,
+                # and special file (FIFO/device) attacks.
                 for member in tf.getmembers():
-                    if member.issym() or member.islnk():
-                        raise RuntimeError(f"Blocked tar symlink/hardlink member: {member.name}")
+                    if not member.isfile() and not member.isdir():
+                        raise RuntimeError(f"Blocked tar non-file/non-dir member: {member.name} (type={member.type})")
                     member_path = (dest / member.name).resolve()
                     if not member_path.is_relative_to(dest.resolve()):
                         raise RuntimeError(f"Blocked tar member with traversal: {member.name}")
-                tf.extractall(dest)
+                    tf.extract(member, dest)
     elif archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
             for member in zf.infolist():
