@@ -469,6 +469,11 @@ def _extract(archive: Path, dest: Path) -> None:
             try:
                 tf.extractall(dest, filter='data')
             except TypeError:
+                # Python < 3.12: filter= not supported. Validate manually.
+                for member in tf.getmembers():
+                    member_path = (dest / member.name).resolve()
+                    if not member_path.is_relative_to(dest.resolve()):
+                        raise RuntimeError(f"Blocked tar member with traversal: {member.name}")
                 tf.extractall(dest)
     elif archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
@@ -675,26 +680,26 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
     if force:
         # Upgrade/reinstall: skip the subprocess-spawning smoke test of the
         # currently installed binary — only the target tag is needed.
-        existing = None
+        _existing = None  # CodeQL: underscore prefix = intentionally unused
         target_tag = version or _latest_tag()
     else:
-        existing = check()
-        target_tag = version or existing.get("latest_tag") or _latest_tag()
+        _existing = check()
+        target_tag = version or _existing.get("latest_tag") or _latest_tag()
     if not target_tag:
         return {"ok": False, "detail": "Could not determine the latest release tag."}
 
     # Skip only when the installed backend matches AND (the tag matches, or the
     # install is a source build — always built from latest master), unless
     # `force` is set (used by `upgrade`).
-    if not force and existing is not None:
-        is_source = existing.get("method") == "source"
-        same_backend = existing.get("backend") == backend
-        same_tag = existing.get("tag") == target_tag
-        if existing["installed"] and existing["runs"] and same_backend and (same_tag or is_source):
+    if not force and _existing is not None:
+        is_source = _existing.get("method") == "source"
+        same_backend = _existing.get("backend") == backend
+        same_tag = _existing.get("tag") == target_tag
+        if _existing["installed"] and _existing["runs"] and same_backend and (same_tag or is_source):
             return {
                 "ok": True,
                 "skipped": True,
-                "detail": f"Already installed and working at {target_tag}: {existing['binary']}",
+                "detail": f"Already installed and working at {target_tag}: {_existing['binary']}",
             }
     tag = target_tag
     asset = _asset_name(tag, backend)
