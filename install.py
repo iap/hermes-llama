@@ -352,9 +352,18 @@ def _extract(archive: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     if archive.name.endswith(".tar.gz"):
         with tarfile.open(archive, "r:gz") as tf:
-            tf.extractall(dest)
+            try:
+                tf.extractall(dest, filter='data')
+            except TypeError:
+                tf.extractall(dest)
     elif archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
+            for member in zf.infolist():
+                target = (dest / member.filename).resolve()
+                try:
+                    target.relative_to(dest.resolve())
+                except ValueError:
+                    raise RuntimeError(f"Blocked zip member with traversal: {member.filename}")
             zf.extractall(dest)
 
 

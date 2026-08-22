@@ -143,13 +143,20 @@ def test_install_upgrades_when_tag_differs():
     Regression for the upgrade no-op bug: a newer release (or the version pin)
     must not be skipped just because the binary already runs.
     """
-    saved = (install.check, install._download_cached, install._build_from_source)
+    saved = (install.check, install._download_cached, install._build_from_source,
+             install._asset_name, install._macos_ver, install._arch)
     calls = {}
     try:
         install.check = lambda: {
             "installed": True, "binary": "b", "version": "v", "runs": True,
             "tag": "b10540", "latest_tag": "b10549", "up_to_date": False,
         }
+        # Force asset selection to succeed even on hosts where the CPU prebuilt
+        # is unavailable (e.g. macOS < 13.3) so the test probes the upgrade
+        # logic, not host-specific asset availability.
+        install._asset_name = lambda tag, backend: f"llama-{tag}-bin-macos-x64.tar.gz"
+        install._macos_ver = lambda: (14, 0)
+        install._arch = lambda: "x64"
 
         def _record(tag, asset):
             calls["tag"] = tag
@@ -161,7 +168,8 @@ def test_install_upgrades_when_tag_differs():
         assert calls.get("tag") == "b10549", calls
         assert r.get("skipped") is not True, r
     finally:
-        install.check, install._download_cached, install._build_from_source = saved
+        install.check, install._download_cached, install._build_from_source = saved[:3]
+        install._asset_name, install._macos_ver, install._arch = saved[3:]
 
 
 def main() -> int:
