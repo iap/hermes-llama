@@ -310,12 +310,38 @@ def _latest_tag() -> str | None:
                 return data.get("tag")
     except Exception:
         pass
-    try:
-        with urllib.request.urlopen(GITHUB_API + "/releases?per_page=30", timeout=20) as resp:
-            releases = json.loads(resp.read().decode())
-    except Exception:
-        return None
-    if not isinstance(releases, list):
+    # Paginated fetch: per_page=100 and follow Link rel=next (up to 3 pages)
+    # so a burst of nightly prereleases cannot push the first stable
+    # bNNNN off the first page (previously per_page=30, single page).
+    releases_all: list[dict] = []
+    url = GITHUB_API + "/releases?per_page=100"
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=20) as resp:
+                page = json.loads(resp.read().decode())
+                if not isinstance(page, list):
+                    break
+                releases_all.extend(page)
+                link = resp.headers.get("Link", "") if hasattr(resp, "headers") else ""
+                nxt = None
+                if link:
+                    for part in link.split(","):
+                        if 'rel="next"' in part:
+                            s = part.find("<")
+                            e = part.find(">")
+                            if s != -1 and e != -1:
+                                nxt = part[s + 1:e]
+                                break
+                if nxt:
+                    url = nxt
+                    continue
+                break
+        except Exception:
+            if releases_all:
+                break
+            return None
+    releases = releases_all
+    if not releases:
         return None
 
     tag = None
