@@ -78,13 +78,18 @@ def _install_lock():
                 msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError:
                 # fallback: blocking
-                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                except OSError as exc:
+                    fh.close()
+                    raise RuntimeError(f"install lock failed: {exc}") from exc
         else:
             try:
                 import fcntl
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            except Exception:
-                pass
+            except Exception as exc:
+                fh.close()
+                raise RuntimeError(f"install lock failed: {exc}") from exc
         yield
     finally:
         if fh is not None:
