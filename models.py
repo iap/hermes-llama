@@ -320,7 +320,7 @@ def _is_llama_server(pid: int) -> bool:
         comm = Path(f"/proc/{pid}/comm")
         if comm.is_file():
             return "llama-server" in comm.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort read
         pass
     try:
         out = subprocess.run(
@@ -353,7 +353,7 @@ def _wait_healthy(base: str, timeout: float = 60.0) -> bool:
             with urllib.request.urlopen(f"{base}/health", timeout=3) as resp:
                 if resp.status == 200:
                     return True
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort read
             pass
         time.sleep(1)
     return False
@@ -433,7 +433,7 @@ def serve(alias: str) -> str:
         tail = ""
         try:
             tail = log_path.read_text(encoding="utf-8", errors="replace")[-300:].strip()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort read
             pass
         return f"llama-server exited immediately (exit {code}). {tail}"
     base = f"http://{s['host']}:{s['port']}"
@@ -455,7 +455,7 @@ def stop() -> str:
         else:
             try:
                 os.killpg(pid, signal.SIGTERM)
-            except ProcessLookupError:
+            except ProcessLookupError:  # noqa: BLE001 — PID already gone
                 pass
             # Poll briefly before SIGKILL; avoid killing a reused PID group.
             for _ in range(10):
@@ -465,7 +465,7 @@ def stop() -> str:
             else:
                 try:
                     os.killpg(pid, signal.SIGKILL)
-                except Exception:
+                except Exception:  # noqa: BLE001 — PID already gone or reused
                     pass
     except Exception as exc:
         return f"Failed to stop pid {pid}: {exc}"

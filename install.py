@@ -99,18 +99,18 @@ def _install_lock():
                     try:
                         fh.seek(0)
                         msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — best-effort unlock, file closed below anyway
                         pass
                 else:
                     try:
                         import fcntl
                         fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — best-effort unlock, file closed below anyway
                         pass
             finally:
                 try:
                     fh.close()
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort close
                     pass
 
 
@@ -260,7 +260,7 @@ def _check_impl(*, fetch_latest: bool = True) -> dict:
                 data = _json.loads(cache.read_text())
                 if _time.time() - float(data.get("ts", 0)) < _TAG_CACHE_TTL:
                     latest = data.get("tag")
-        except Exception:
+        except Exception:  # noqa: BLE001 — cache miss is fine, network fetch follows
             pass
     result["latest_tag"] = latest
     if binary is None:
@@ -376,7 +376,7 @@ def _latest_tag() -> str | None:
             data = json.loads(cache.read_text())
             if time.time() - float(data.get("ts", 0)) < _TAG_CACHE_TTL:
                 return data.get("tag")
-    except Exception:
+    except Exception:  # noqa: BLE001 — cache miss is fine, network fetch follows
         pass
     # Paginated fetch: per_page=100 and follow Link rel=next (up to 3 pages)
     # so a burst of nightly prereleases cannot push the first stable
@@ -428,7 +428,7 @@ def _latest_tag() -> str | None:
         try:
             _cache_dir().mkdir(parents=True, exist_ok=True)
             cache.write_text(json.dumps({"tag": tag, "ts": time.time()}))
-        except Exception:
+        except Exception:  # noqa: BLE001 — cache write failure is non-fatal
             pass
     return tag
 
@@ -608,7 +608,7 @@ def _build_from_source(backend: str) -> dict:
                         if bin_dir().exists():
                             shutil.rmtree(bin_dir(), ignore_errors=True)
                         backup.rename(bin_dir())
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
                         pass
                 shutil.rmtree(staging, ignore_errors=True)
                 return {"ok": False, "method": "source", "detail": f"swap failed: {exc}"}
@@ -620,7 +620,7 @@ def _build_from_source(backend: str) -> dict:
                 if backup.exists():
                     try:
                         backup.rename(bin_dir())
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
                         pass
                 shutil.rmtree(staging, ignore_errors=True)
                 return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
@@ -632,7 +632,7 @@ def _build_from_source(backend: str) -> dict:
                 if backup.exists():
                     try:
                         backup.rename(bin_dir())
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
                         pass
                 shutil.rmtree(staging, ignore_errors=True)
                 return {"ok": False, "method": "source", "detail": f"metadata write failed: {exc}"}
@@ -644,7 +644,7 @@ def _build_from_source(backend: str) -> dict:
             try:
                 if staging.exists():
                     shutil.rmtree(staging, ignore_errors=True)
-            except Exception:
+            except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
                 pass
 
 
@@ -742,7 +742,7 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                                     if bin_dir().exists():
                                         shutil.rmtree(bin_dir(), ignore_errors=True)
                                     backup.rename(bin_dir())
-                                except Exception:
+                                except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
                                     pass
                             shutil.rmtree(staging, ignore_errors=True)
                             return {"ok": False, "method": "prebuilt", "detail": f"swap failed: {exc}"}
@@ -752,7 +752,7 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                             if backup.exists():
                                 try:
                                     backup.rename(bin_dir())
-                                except Exception:
+                                except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
                                     pass
                             shutil.rmtree(staging, ignore_errors=True)
                             return {"ok": False, "method": "prebuilt", "detail": "installed but binary not found after swap"}
@@ -763,7 +763,7 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                             if backup.exists():
                                 try:
                                     backup.rename(bin_dir())
-                                except Exception:
+                                except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
                                     pass
                             shutil.rmtree(staging, ignore_errors=True)
                             return {"ok": False, "method": "prebuilt", "detail": f"metadata write failed: {exc}"}
@@ -774,7 +774,7 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                         try:
                             if staging.exists():
                                 shutil.rmtree(staging, ignore_errors=True)
-                        except Exception:
+                        except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
                             pass
     # No prebuilt asset for this host/backend (e.g. Linux CUDA), or the download
     # failed → source build. (A prebuilt that downloads but fails the smoke test
@@ -826,7 +826,7 @@ def _remove_plugin_artifacts() -> None:
                     shutil.rmtree(p, ignore_errors=True)
                 else:
                     p.unlink(missing_ok=True)
-            except Exception:
+            except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
                 pass
     _meta_path().unlink(missing_ok=True)
     (install_root() / SERVER_PID_FILE_NAME).unlink(missing_ok=True)
