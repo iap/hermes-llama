@@ -763,14 +763,17 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
     if not target_tag:
         return {"ok": False, "detail": "Could not determine the latest release tag."}
 
-    # Skip only when the installed backend matches AND the tag matches (or the
-    # install is a source build confirmed current), unless `force` is set
-    # (used by `upgrade`).
+    # Skip only when the installed backend matches AND the tag matches, or the
+    # install is a source build *confirmed* current and no explicit release was
+    # pinned, unless `force` is set (used by `upgrade`).
     if not force:
         is_source = _existing.get("method") == "source"
         same_backend = _existing.get("backend") == backend
         same_tag = _existing.get("tag") == target_tag
-        source_current = is_source and _existing.get("up_to_date") is not False
+        # Unknown freshness (probe unavailable) must not count as current, and a
+        # source build never satisfies an explicit version pin: it carries no
+        # release tag, so skipping would silently ignore the requested tag.
+        source_current = is_source and not version and _existing.get("up_to_date") is True
         if _existing["installed"] and _existing["runs"] and same_backend and (same_tag or source_current):
             return {
                 "ok": True,

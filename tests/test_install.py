@@ -177,17 +177,17 @@ def test_install_upgrades_when_tag_differs():
 
 
 def test_install_skips_source_build():
-    """A source-built install is always current (built from latest master)."""
+    """A source build confirmed current is skipped (no pin, up_to_date=True)."""
     saved = (install.check, install._download_cached, install._build_from_source)
     try:
         install.check = lambda: {
             "installed": True, "binary": "b", "version": "v", "runs": True,
-            "tag": "source", "latest_tag": "b10549", "up_to_date": None,
+            "tag": "source", "latest_tag": "b10549", "up_to_date": True,
             "backend": "cpu", "method": "source",
         }
 
         def _fail_download(*_a, **_k):
-            raise AssertionError("source builds must not re-download")
+            raise AssertionError("a current source build must not re-download or rebuild")
 
         install._download_cached = _fail_download
         install._build_from_source = _fail_download
@@ -195,6 +195,65 @@ def test_install_skips_source_build():
         assert r.get("skipped") is True, r
     finally:
         install.check, install._download_cached, install._build_from_source = saved
+
+
+def test_install_rebuilds_source_when_freshness_unknown():
+    """Unknown source freshness must not count as current.
+
+    Regression: `up_to_date is not False` treated an unavailable probe as
+    up-to-date and skipped the install, keeping a possibly stale binary.
+    """
+    saved = (install.check, install._download_cached, install._build_from_source,
+             install._asset_name)
+    calls = {}
+    try:
+        install.check = lambda: {
+            "installed": True, "binary": "b", "version": "v", "runs": True,
+            "tag": "source", "latest_tag": "b10549", "up_to_date": None,
+            "backend": "cpu", "method": "source",
+        }
+        install._asset_name = lambda tag, backend: None  # no prebuilt -> source path
+
+        def _record_build(backend):
+            calls["built"] = backend
+            return {"ok": True, "method": "source", "detail": "rebuilt"}
+
+        install._build_from_source = _record_build
+        r = install.install(backend="cpu")
+        assert r.get("skipped") is not True, r
+        assert calls.get("built") == "cpu", calls
+    finally:
+        install.check, install._download_cached, install._build_from_source = saved[:3]
+        install._asset_name = saved[3]
+
+
+def test_install_source_does_not_satisfy_version_pin():
+    """An explicit release pin is never satisfied by a source build."""
+    saved = (install.check, install._download_cached, install._build_from_source,
+             install._asset_name, install._macos_ver, install._arch)
+    calls = {}
+    try:
+        install.check = lambda: {
+            "installed": True, "binary": "b", "version": "v", "runs": True,
+            "tag": "source", "latest_tag": "b10549", "up_to_date": True,
+            "backend": "cpu", "method": "source",
+        }
+        install._asset_name = lambda tag, backend: f"llama-{tag}-bin-ubuntu-x64.tar.gz"
+        install._macos_ver = lambda: (14, 0)
+        install._arch = lambda: "x64"
+
+        def _record(tag, asset):
+            calls["tag"] = tag
+            return None  # simulate download failure -> source fallback
+
+        install._download_cached = _record
+        install._build_from_source = lambda backend: {"ok": False, "method": "source", "detail": "stub"}
+        r = install.install(backend="cpu", version="b10540")
+        assert r.get("skipped") is not True, r
+        assert calls.get("tag") == "b10540", calls
+    finally:
+        install.check, install._download_cached, install._build_from_source = saved[:3]
+        install._asset_name, install._macos_ver, install._arch = saved[3:]
 
 
 def test_install_reinstalls_when_backend_differs():
