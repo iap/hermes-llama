@@ -70,6 +70,9 @@ class LlamaCppProfile(ProviderProfile):
         back to the static list.
         """
         effective_base = (base_url or self.base_url or DEFAULT_BASE_URL).rstrip("/")
+        # Normalize: users may set base without /v1; llama-server serves under /v1
+        if not effective_base.endswith("/v1"):
+            effective_base = effective_base.rstrip("/") + "/v1"
         # llama-server serves OpenAI-compat under /v1; /v1/models is the catalog.
         url = f"{effective_base}/models"
         req = urllib.request.Request(url)

@@ -217,14 +217,22 @@ def pull(spec: str, alias: str | None = None) -> str:
     dest = _model_dest(repo, local_name)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.is_file():
-        # Re-register an existing file (repairs a lost/corrupted registry entry).
-        reg = _load_registry()
-        reg[alias] = {
-            "repo": repo, "file": local_name, "path": str(dest),
-            "size_gb": round(dest.stat().st_size / 1024**3, 2),
-        }
-        _save_registry(reg)
-        return f"Already present: {dest} (registered as '{alias}')."
+        # Guard: 0-byte/truncated files are not "present" — re-download them.
+        try:
+            sz = dest.stat().st_size
+        except Exception:
+            sz = 0
+        if sz < 1024 * 1024:  # <1 MiB is definitely truncated
+            dest.unlink(missing_ok=True)
+        else:
+            # Re-register an existing file (repairs a lost/corrupted registry entry).
+            reg = _load_registry()
+            reg[alias] = {
+                "repo": repo, "file": local_name, "path": str(dest),
+                "size_gb": round(sz / 1024**3, 2),
+            }
+            _save_registry(reg)
+            return f"Already present: {dest} (registered as '{alias}')."
     url = _hf_file_url(repo, remote_file)
     try:
         _download_model(url, dest)

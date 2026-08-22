@@ -170,10 +170,10 @@ def _smoke_test(binary: Path, timeout: float = 8.0) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def check() -> dict:
+def check(*, fetch_latest: bool = True) -> dict:
     """Return install status incl. version, runs flag, and upgrade hint. Never raises."""
     try:
-        return _check_impl()
+        return _check_impl(fetch_latest=fetch_latest)
     except Exception as exc:  # noqa: BLE001
         return {
             "installed": False, "binary": None, "version": None, "runs": False,
@@ -182,7 +182,7 @@ def check() -> dict:
         }
 
 
-def _check_impl() -> dict:
+def _check_impl(*, fetch_latest: bool = True) -> dict:
     result = {
         "installed": False,
         "binary": None,
@@ -193,7 +193,18 @@ def _check_impl() -> dict:
         "up_to_date": None,
     }
     binary = find_binary()
-    latest = _latest_tag()
+    latest = _latest_tag() if fetch_latest else None
+    # If fetch suppressed, try cache without network
+    if not fetch_latest:
+        try:
+            cache = _cache_dir() / "latest_tag.json"
+            if cache.is_file():
+                import json as _json, time as _time
+                data = _json.loads(cache.read_text())
+                if _time.time() - float(data.get("ts", 0)) < _TAG_CACHE_TTL:
+                    latest = data.get("tag")
+        except Exception:
+            pass
     result["latest_tag"] = latest
     if binary is None:
         return result
