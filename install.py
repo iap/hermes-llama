@@ -828,23 +828,54 @@ def _uninstall_impl() -> dict:
         # by an aborted prior install, but report "nothing installed".
         _remove_plugin_artifacts()
         return {"ok": True, "detail": "Nothing installed; cleared plugin artifacts (models kept)."}
-    _remove_plugin_artifacts()
-    return {"ok": True, "detail": f"Removed plugin-managed llama.cpp (models kept at {models_dir()})."}
+    ok, survivors = _remove_plugin_artifacts()
+    if ok:
+        detail = f"Removed plugin-managed llama.cpp (models kept at {models_dir()})."
+    else:
+        detail = "Removed most plugin artifacts; survivors: " + ", ".join(
+            str(p) for p in survivors
+        )
+    return {"ok": ok, "detail": detail}
 
 
-def _remove_plugin_artifacts() -> None:
+def _remove_plugin_artifacts() -> tuple[bool, list[Path]]:
+    """Delete plugin-managed artifacts (bin/, src/, .cache/, swap temps, meta).
+
+    Returns ``(ok, survivors)`` where ``survivors`` lists paths that could not be
+    removed. The caller must treat ``ok is False`` as an incomplete uninstall:
+    previously ``shutil.rmtree(..., ignore_errors=True)`` swallowed every failure
+    (e.g. ``PermissionError`` on a read-only ``bin/``) and ``_uninstall_impl``
+    hard-coded ``ok=True`` (M2).
+
+    ``models/`` + ``models.json`` are intentionally never touched — downloaded
+    GGUFs are user data and survive uninstall.
+    """
+    survivors: list[Path] = []
+
+    def _on_error(_fn: object, path: str, _excinfo: object) -> None:
+        # Record every path rmtree could not remove so we can report it.
+        survivors.append(Path(path))
+
+    root = install_root()
     for sub in (BIN_DIR_NAME, SRC_DIR_NAME, CACHE_DIR_NAME):
-        shutil.rmtree(install_root() / sub, ignore_errors=True)
-    # purge leftover atomic-swap temps (do not touch lock file while locked)
+        d = root / sub
+        if d.exists():
+            shutil.rmtree(d, onexc=_on_error)
+    # purge leftover atomic-swap temps (do not touch the lock file while locked)
     for pat in (f"{BIN_DIR_NAME}.tmp*", f"{BIN_DIR_NAME}.bak*"):
-        for p in install_root().glob(pat):
+        for p in sorted(root.glob(pat)):
             try:
                 if p.is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
+                    shutil.rmtree(p, onexc=_on_error)
                 else:
                     p.unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
-                pass
+            except Exception:  # noqa: BLE001 — record and continue
+                survivors.append(p)
     _meta_path().unlink(missing_ok=True)
-    (install_root() / SERVER_PID_FILE_NAME).unlink(missing_ok=True)
-    (install_root() / SERVER_LOG_FILE_NAME).unlink(missing_ok=True)
+    (root / SERVER_PID_FILE_NAME).unlink(missing_ok=True)
+    (root / SERVER_LOG_FILE_NAME).unlink(missing_ok=True)
+    # Post-condition (M2): assert bin/ is actually gone, since a failed rmtree
+    # may have left it (and its dylibs) behind.
+    if bin_dir().exists():
+        survivors.append(bin_dir())
+    return (not survivors, survivors)
