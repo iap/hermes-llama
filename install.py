@@ -85,7 +85,7 @@ def _macos_ver() -> tuple[int, int]:
 def _hermes_home() -> Path:
     override = os.environ.get("HERMES_HOME", "").strip()
     if override:
-        return Path(override).expanduser()
+        return Path(os.path.expandvars(override)).expanduser()
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home())
         return Path(base) / WINDOWS_HERMES_DIR_NAME
@@ -95,7 +95,7 @@ def _hermes_home() -> Path:
 def install_root() -> Path:
     override = os.environ.get("LLAMA_CPP_INSTALL_DIR", "").strip()
     if override:
-        return Path(override).expanduser()
+        return Path(os.path.expandvars(override)).expanduser()
     return _hermes_home() / INSTALL_DIR_NAME
 
 
@@ -106,7 +106,7 @@ def bin_dir() -> Path:
 def models_dir() -> Path:
     override = os.environ.get("LLAMA_CPP_MODELS_DIR", "").strip()
     if override:
-        return Path(override).expanduser()
+        return Path(os.path.expandvars(override)).expanduser()
     return install_root() / MODELS_DIR_NAME
 
 
@@ -126,8 +126,11 @@ def _read_meta() -> dict:
 
 
 def _write_meta(meta: dict) -> None:
-    _meta_path().parent.mkdir(parents=True, exist_ok=True)
-    _meta_path().write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    path = _meta_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # ── discovery ────────────────────────────────────────────────────────────────
@@ -174,7 +177,8 @@ def check() -> dict:
     except Exception as exc:  # noqa: BLE001
         return {
             "installed": False, "binary": None, "version": None, "runs": False,
-            "tag": None, "latest_tag": None, "up_to_date": None, "detail": str(exc),
+            "tag": None, "latest_tag": None, "up_to_date": None,
+            "backend": None, "method": None, "detail": str(exc),
         }
 
 
@@ -198,9 +202,14 @@ def _check_impl() -> dict:
     ok, info = _smoke_test(binary)
     result["runs"] = ok
     result["version"] = info
-    tag = _read_meta().get("tag")
-    result["tag"] = tag
-    result["up_to_date"] = (tag == latest) if (tag and latest) else None
+    meta = _read_meta()
+    result["tag"] = meta.get("tag")
+    result["backend"] = meta.get("backend")
+    result["method"] = meta.get("method")
+    if meta.get("method") == "source":
+        result["up_to_date"] = True  # source builds are always built from latest master
+    else:
+        result["up_to_date"] = (result["tag"] == latest) if (result["tag"] and latest) else None
     return result
 
 
@@ -247,15 +256,20 @@ def _asset_name(tag: str, backend: str) -> str | None:
             return None
         return f"llama-{tag}-bin-macos-{arch}.tar.gz"
     if _is_windows():
-        if backend == "cuda" and arch == "x64":
-            # cudart-* bundles the CUDA runtime (self-contained, no toolkit needed);
-            # the bare llama-* CUDA build requires a separately-installed CUDA runtime.
-            return "cudart-llama-bin-win-cuda-12.4-x64.zip"
-        if backend == "cuda" and arch == "arm64":
-            return "cudart-llama-bin-win-cuda-13.4-arm64.zip"
-        if backend == "vulkan" and arch == "x64":
-            return f"llama-{tag}-bin-win-vulkan-x64.zip"
-        return f"llama-{tag}-bin-win-cpu-{arch}.zip"
+        if backend == "cuda":
+            if arch == "x64":
+                # cudart-* bundles the CUDA runtime (self-contained, no toolkit needed);
+                # the bare llama-* CUDA build requires a separately-installed CUDA runtime.
+                return "cudart-llama-bin-win-cuda-12.4-x64.zip"
+            if arch == "arm64":
+                return "cudart-llama-bin-win-cuda-13.4-arm64.zip"
+            return None  # no CUDA asset for this arch
+        if backend == "vulkan":
+            # Only x64 Vulkan assets are published (no win-vulkan-arm64).
+            return f"llama-{tag}-bin-win-vulkan-x64.zip" if arch == "x64" else None
+        if backend == "cpu" and arch in ("x64", "arm64"):
+            return f"llama-{tag}-bin-win-cpu-{arch}.zip"
+        return None
     # Linux (or other POSIX).
     if backend == "vulkan":
         return f"llama-{tag}-bin-ubuntu-vulkan-{arch}.tar.gz"
@@ -266,6 +280,11 @@ def _asset_name(tag: str, backend: str) -> str | None:
 
 
 # ── download / extract ───────────────────────────────────────────────────────
+
+def _is_build(tag: str) -> bool:
+    """True for a llama.cpp build-number tag (e.g. ``b10549``)."""
+    return bool(tag) and tag[0] == "b" and tag[1:].isdigit()
+
 
 _TAG_CACHE_TTL = 600  # seconds; avoid repeated GitHub API hits within a run
 
@@ -294,9 +313,6 @@ def _latest_tag() -> str | None:
         return None
     if not isinstance(releases, list):
         return None
-
-    def _is_build(tag: str) -> bool:
-        return bool(tag) and tag[0] == "b" and tag[1:].isdigit()
 
     tag = None
     for rel in releases:
@@ -421,6 +437,15 @@ def _build_from_source(backend: str) -> dict:
             return {"ok": False, "method": "source", "detail": f"git clone failed: {proc.stderr.strip()[:300]}"}
     build = src / "build"
     cmake_args = [cmake, "-S", str(src), "-B", str(build)]
+    # No embedded web UI: it needs node/npm + a HF download and dominates build
+    # time (often hangs). The plugin only serves the HTTP API (/v1/...), so skip
+    # the UI and the tests/examples we never build.
+    cmake_args += [
+        "-DLLAMA_BUILD_UI=OFF",
+        "-DLLAMA_USE_PREBUILT_UI=OFF",
+        "-DLLAMA_BUILD_TESTS=OFF",
+        "-DLLAMA_BUILD_EXAMPLES=OFF",
+    ]
     if backend == "cuda":
         cmake_args += ["-DGGML_CUDA=ON"]
     if backend == "vulkan":
@@ -456,10 +481,10 @@ def _build_from_source(backend: str) -> dict:
     moved = find_binary()
     if moved is None:
         return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
-    ok, info = _smoke_test(moved)
+    ok, info = _smoke_test(moved, timeout=20.0)
     if not ok:
         return {"ok": False, "method": "source", "detail": f"built binary does not run: {info}"}
-    _write_meta({"tag": "source", "backend": backend})
+    _write_meta({"tag": "source", "method": "source", "backend": backend})
     return {"ok": True, "method": "source", "detail": f"Built llama.cpp from source → {moved}"}
 
 
@@ -483,21 +508,34 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
         # Explicit source build — used on hosts whose prebuilt is incompatible
         # (e.g. macOS < 13.3).
         return _build_from_source("cpu")
-    existing = check()
     # Version pinning: explicit arg > LLAMA_CPP_VERSION > latest release.
     version = version or os.environ.get("LLAMA_CPP_VERSION", "").strip() or None
-    target_tag = version or existing.get("latest_tag") or _latest_tag()
+    if version and not _is_build(version):
+        return {"ok": False, "detail": f"Invalid version pin '{version}': expected a build tag like b10549."}
+    if force:
+        # Upgrade/reinstall: skip the subprocess-spawning smoke test of the
+        # currently installed binary — only the target tag is needed.
+        existing = None
+        target_tag = version or _latest_tag()
+    else:
+        existing = check()
+        target_tag = version or existing.get("latest_tag") or _latest_tag()
     if not target_tag:
         return {"ok": False, "detail": "Could not determine the latest release tag."}
 
-    # Skip only when the installed tag already matches the target AND it runs,
-    # unless `force` is set (used by `upgrade`).
-    if not force and existing["installed"] and existing["runs"] and existing.get("tag") == target_tag:
-        return {
-            "ok": True,
-            "skipped": True,
-            "detail": f"Already installed and working at {target_tag}: {existing['binary']}",
-        }
+    # Skip only when the installed backend matches AND (the tag matches, or the
+    # install is a source build — always built from latest master), unless
+    # `force` is set (used by `upgrade`).
+    if not force and existing is not None:
+        is_source = existing.get("method") == "source"
+        same_backend = existing.get("backend") == backend
+        same_tag = existing.get("tag") == target_tag
+        if existing["installed"] and existing["runs"] and same_backend and (same_tag or is_source):
+            return {
+                "ok": True,
+                "skipped": True,
+                "detail": f"Already installed and working at {target_tag}: {existing['binary']}",
+            }
     tag = target_tag
     asset = _asset_name(tag, backend)
     if asset:
@@ -521,7 +559,7 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                                 "If this is macOS < 13.3, the prebuilt requires a newer OS."
                             ),
                         }
-                    _write_meta({"tag": tag, "backend": backend})
+                    _write_meta({"tag": tag, "method": "prebuilt", "backend": backend})
                     return {"ok": True, "method": "prebuilt", "detail": f"Installed {tag} prebuilt → {moved}"}
     # No prebuilt asset for this host/backend (e.g. Linux CUDA), or the download
     # failed → source build. (A prebuilt that downloads but fails the smoke test

@@ -30,19 +30,13 @@ No Homebrew, Winget, conda, Nix, or MacPorts. Everything lives under
 ## Install
 
 ```bash
-# 1. The general plugin (slash + CLI commands)
+# Install and enable the plugin (slash + CLI commands + the "Llama CPP" provider)
 hermes plugins install iap/hermes-llama --enable
-
-# 2. The provider profile (guaranteed picker auto-injection via standard discovery)
-mkdir -p "$HERMES_HOME/plugins/model-providers/llama-cpp"
-cp model-provider/llama-cpp/__init__.py model-provider/llama-cpp/plugin.yaml \
-   "$HERMES_HOME/plugins/model-providers/llama-cpp/"
 ```
 
 > `$HERMES_HOME` is `~/.hermes` (POSIX/WSL) or `%LOCALAPPDATA%\hermes` (Windows);
-> run `hermes config path` to confirm. Step 2 is optional — the general plugin
-> also self-registers the provider at load — but it is the reliable way to
-> guarantee "Llama CPP" appears in the picker regardless of load order.
+> run `hermes config path` to confirm. The plugin self-registers the "Llama CPP"
+> provider at load, so no separate provider install step is needed.
 
 ## Usage
 
@@ -120,7 +114,6 @@ hermes-llama/
 ├── provider.py              # LlamaCppProfile ("Llama CPP")
 ├── install.py               # check / install / upgrade / uninstall (no pkg mgrs)
 ├── models.py                # GGUF pull / serve / stop / status / list
-├── model-provider/llama-cpp/  # standalone provider plugin (optional companion)
 ├── skills/llama-cpp-local-models/SKILL.md
 ├── RESEARCH.md              # source-backed findings + cross-check
 └── OPTIMIZATIONS.md         # design decisions + optimization analysis

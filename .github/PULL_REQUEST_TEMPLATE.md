@@ -12,7 +12,7 @@
 
 ## Checklist
 - [ ] Ran `python -m py_compile` on all `.py` files
-- [ ] Validated `plugin.yaml` and `model-provider/*/plugin.yaml` parse as YAML
+- [ ] Validated `plugin.yaml` parses as YAML
 - [ ] Ran the smoke tests (`python tests/test_install.py`)
 - [ ] Updated docs (README / SKILL.md / plugin.yaml description) if behavior changed
 

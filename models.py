@@ -58,6 +58,11 @@ LIQUIDAI_PRESETS = {
 }
 
 
+def _model_dest(repo: str, local_name: str) -> Path:
+    """Model file location, namespaced by repo to avoid basename collisions."""
+    return install.models_dir() / repo.replace("/", "__") / local_name
+
+
 def _registry_path() -> Path:
     return install.install_root() / install.REGISTRY_FILE_NAME
 
@@ -177,8 +182,9 @@ def _download_model(url: str, dest: Path) -> None:
         if curl:
             proc = subprocess.run(
                 [curl, "-L", "--fail", "--retry", "3", "--retry-delay", "2",
+                 "--retry-all-errors", "-C", "-",
                  "-A", "hermes-llama", "-o", str(tmp), url],
-                capture_output=True, text=True, timeout=3600,
+                capture_output=True, text=True, timeout=7200,
             )
             if proc.returncode != 0:
                 raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]}")
@@ -208,9 +214,8 @@ def pull(spec: str, alias: str | None = None) -> str:
     remote_file = file
     local_name = Path(file).name
     alias = alias or default_alias
-    dest_dir = install.models_dir()
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / local_name
+    dest = _model_dest(repo, local_name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.is_file():
         # Re-register an existing file (repairs a lost/corrupted registry entry).
         reg = _load_registry()
@@ -240,6 +245,8 @@ def _pid_alive(pid: int) -> bool:
     ``CREATE_NEW_PROCESS_GROUP`` (our llama-server). Use ``OpenProcess`` +
     ``GetExitCodeProcess`` there, which is the correct liveness check.
     """
+    if pid <= 0:
+        return False
     if sys.platform != "win32":
         try:
             os.kill(pid, 0)
@@ -251,10 +258,11 @@ def _pid_alive(pid: int) -> bool:
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     STILL_ACTIVE = 259
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong]
+    # Windows BOOL is a 32-bit int, not ctypes.c_bool (1 byte).
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
     kernel32.OpenProcess.restype = ctypes.c_void_p
     kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
-    kernel32.GetExitCodeProcess.restype = ctypes.c_bool
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
@@ -268,12 +276,44 @@ def _pid_alive(pid: int) -> bool:
 def _is_llama_server(pid: int) -> bool:
     """Confirm a PID belongs to llama-server (guard against PID reuse).
 
-    On POSIX we read the process comm name via ``ps``; on Windows the process
-    name is not cheaply available, so we defer to ``_pid_alive`` (liveness)
-    plus the pid file written by ``serve()``.
+    On Windows we open the process and read its executable image name (so a
+    reused PID is not mistaken for a live server). On POSIX we prefer
+    ``/proc/<pid>/comm`` (Linux, no ``ps`` needed) and fall back to ``ps``.
     """
+    if pid <= 0:
+        return False
     if sys.platform == "win32":
-        return True
+        import ctypes
+
+        try:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.QueryFullProcessImageNameW.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_ulong),
+            ]
+            kernel32.QueryFullProcessImageNameW.restype = ctypes.c_int
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            try:
+                buf = ctypes.create_unicode_buffer(32768)
+                size = ctypes.c_ulong(len(buf))
+                if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    return False
+                return Path(buf.value).name.lower() == "llama-server.exe"
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        comm = Path(f"/proc/{pid}/comm")
+        if comm.is_file():
+            return "llama-server" in comm.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     try:
         out = subprocess.run(
             ["ps", "-p", str(pid), "-o", "comm="],
@@ -333,7 +373,7 @@ def serve(alias: str) -> str:
         file = file or _pick_gguf_file(_repo) or ""
         if not file:
             return f"No .gguf file found in {_repo}."
-        path = install.models_dir() / Path(file).name
+        path = _model_dest(_repo, Path(file).name)
         if path.is_file():
             # Use the preset's canonical alias so /v1/models matches `pull`'s id.
             model = {"path": str(path), "alias": default_alias}
@@ -373,6 +413,21 @@ def serve(alias: str) -> str:
     finally:
         log_file.close()
     _server_pid_path().write_text(str(proc.pid), encoding="utf-8")
+    # If the server exited immediately (bad flags, missing model, port already
+    # bound), don't leave a stale pid file or report "still loading" for a dead
+    # process.
+    try:
+        code = proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        code = None
+    if code is not None:
+        _server_pid_path().unlink(missing_ok=True)
+        tail = ""
+        try:
+            tail = log_path.read_text(encoding="utf-8", errors="replace")[-300:].strip()
+        except Exception:
+            pass
+        return f"llama-server exited immediately (exit {code}). {tail}"
     base = f"http://{s['host']}:{s['port']}"
     ready = _wait_healthy(base, timeout=float(_int_env("LLAMA_CPP_HEALTH_TIMEOUT", 60)))
     state = "ready" if ready else "still loading (watch `/llama status`)"

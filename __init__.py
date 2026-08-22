@@ -53,7 +53,10 @@ def _dispatch(cmd: str, argv: list[str]) -> str:
         else:
             line = f"llama-server installed at {r['binary']} — DOES NOT RUN: {r.get('version') or 'unknown reason'}"
         if r.get("up_to_date") is True:
-            line += f"; up to date (release {r.get('latest_tag')})"
+            if r.get("method") == "source":
+                line += "; up to date (source build)"
+            else:
+                line += f"; up to date (release {r.get('latest_tag')})"
         elif r.get("up_to_date") is False:
             line += f"; update available ({r.get('tag')} → {r.get('latest_tag')})"
         elif r.get("latest_tag"):

@@ -125,13 +125,15 @@ def test_install_skips_only_on_matching_tag():
         install.check = lambda: {
             "installed": True, "binary": "b", "version": "v", "runs": True,
             "tag": "b10549", "latest_tag": "b10549", "up_to_date": True,
+            "backend": "cpu", "method": "prebuilt",
         }
 
         def _fail_download(*_a, **_k):
             raise AssertionError("must not re-download when the tag already matches")
 
         install._download_cached = _fail_download
-        r = install.install(backend="cpu")
+        with _Platform(arch="x64"):  # Linux: _asset_name returns a real asset name
+            r = install.install(backend="cpu")
         assert r.get("skipped") is True, r
     finally:
         install.check, install._download_cached = saved
@@ -150,6 +152,7 @@ def test_install_upgrades_when_tag_differs():
         install.check = lambda: {
             "installed": True, "binary": "b", "version": "v", "runs": True,
             "tag": "b10540", "latest_tag": "b10549", "up_to_date": False,
+            "backend": "cpu", "method": "prebuilt",
         }
         # Force asset selection to succeed even on hosts where the CPU prebuilt
         # is unavailable (e.g. macOS < 13.3) so the test probes the upgrade
@@ -170,6 +173,52 @@ def test_install_upgrades_when_tag_differs():
     finally:
         install.check, install._download_cached, install._build_from_source = saved[:3]
         install._asset_name, install._macos_ver, install._arch = saved[3:]
+
+
+def test_install_skips_source_build():
+    """A source-built install is always current (built from latest master)."""
+    saved = (install.check, install._download_cached, install._build_from_source)
+    try:
+        install.check = lambda: {
+            "installed": True, "binary": "b", "version": "v", "runs": True,
+            "tag": "source", "latest_tag": "b10549", "up_to_date": None,
+            "backend": "cpu", "method": "source",
+        }
+
+        def _fail_download(*_a, **_k):
+            raise AssertionError("source builds must not re-download")
+
+        install._download_cached = _fail_download
+        install._build_from_source = _fail_download
+        r = install.install(backend="cpu")
+        assert r.get("skipped") is True, r
+    finally:
+        install.check, install._download_cached, install._build_from_source = saved
+
+
+def test_install_reinstalls_when_backend_differs():
+    """A CPU install must not skip a request for a different backend."""
+    saved = (install.check, install._download_cached, install._build_from_source)
+    calls = {}
+    try:
+        install.check = lambda: {
+            "installed": True, "binary": "b", "version": "v", "runs": True,
+            "tag": "b10549", "latest_tag": "b10549", "up_to_date": True,
+            "backend": "cpu", "method": "prebuilt",
+        }
+
+        def _record(tag, asset):
+            calls["tag"] = tag
+            return None
+
+        install._download_cached = _record
+        install._build_from_source = lambda backend: {"ok": False, "method": "source", "detail": "stub"}
+        with _Platform(arch="x64"):
+            r = install.install(backend="vulkan")
+        assert r.get("skipped") is not True, r
+        assert calls.get("tag") == "b10549", calls
+    finally:
+        install.check, install._download_cached, install._build_from_source = saved
 
 
 def main() -> int:

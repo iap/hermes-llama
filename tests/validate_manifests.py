@@ -1,7 +1,6 @@
-"""Validate that every plugin manifest parses as YAML.
+"""Validate that the root plugin manifest parses as YAML.
 
-Checks the root plugin.yaml and every model-provider/*/plugin.yaml. Uses PyYAML
-(the only non-stdlib dependency, installed in CI only).
+Uses PyYAML (the only non-stdlib dependency, installed in CI only).
 """
 
 from __future__ import annotations
@@ -14,9 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def manifests() -> list[Path]:
-    root = REPO_ROOT / "plugin.yaml"
-    providers = sorted((REPO_ROOT / "model-provider").glob("*/plugin.yaml"))
-    return [root, *providers]
+    return [REPO_ROOT / "plugin.yaml"]
 
 
 def main() -> int:
