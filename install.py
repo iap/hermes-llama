@@ -790,7 +790,8 @@ def uninstall() -> dict:
     survive uninstall.
     """
     try:
-        return _uninstall_impl()
+        with _install_lock():
+            return _uninstall_impl()
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "detail": f"Uninstall failed: {exc}"}
 
@@ -812,7 +813,7 @@ def _uninstall_impl() -> dict:
 def _remove_plugin_artifacts() -> None:
     for sub in (BIN_DIR_NAME, SRC_DIR_NAME, CACHE_DIR_NAME):
         shutil.rmtree(install_root() / sub, ignore_errors=True)
-    # purge leftover atomic-swap temps
+    # purge leftover atomic-swap temps (do not touch lock file while locked)
     for pat in (f"{BIN_DIR_NAME}.tmp*", f"{BIN_DIR_NAME}.bak*"):
         for p in install_root().glob(pat):
             try:
@@ -825,4 +826,3 @@ def _remove_plugin_artifacts() -> None:
     _meta_path().unlink(missing_ok=True)
     (install_root() / SERVER_PID_FILE_NAME).unlink(missing_ok=True)
     (install_root() / SERVER_LOG_FILE_NAME).unlink(missing_ok=True)
-    (install_root() / ".install.lock").unlink(missing_ok=True)
