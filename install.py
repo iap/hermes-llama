@@ -812,7 +812,15 @@ def _uninstall_impl() -> dict:
     # user also has) must not make us refuse to manage our own install.
     ours = (bin_dir() / SERVER_BIN).is_file() or _meta_path().is_file()
     if ours:
-        _remove_plugin_artifacts()
+        survivors = _remove_plugin_artifacts()
+        # Final integrity check: the bin dir must actually be gone.
+        if bin_dir().exists():
+            survivors.append(str(bin_dir()))
+        if survivors:
+            return {
+                "ok": False,
+                "detail": "Uninstall incomplete; could not remove: " + "; ".join(sorted(set(survivors))),
+            }
         return {"ok": True, "detail": f"Removed plugin-managed llama.cpp (models kept at {models_dir()})."}
     # Not ours. If a llama-server exists elsewhere on PATH, say so; otherwise
     # there is simply nothing to remove.
@@ -824,19 +832,38 @@ def _uninstall_impl() -> dict:
     return {"ok": True, "detail": "Nothing installed; cleared plugin artifacts (models kept)."}
 
 
-def _remove_plugin_artifacts() -> None:
+def _remove_plugin_artifacts() -> list[str]:
+    """Remove plugin-managed artifacts; never raises.
+
+    Returns a list of survivor paths that could not be removed (best-effort
+    collection via ``onexc``). The caller reports these so uninstall surfaces a
+    real failure instead of silently succeeding.
+    """
+    failures: list[str] = []
+
+    def _on_error(func, path, _excinfo):  # noqa: ANN001 — shutil onexc signature
+        # Record the path that could not be removed; ignore the specific op.
+        _ = func
+        failures.append(str(path))
+
     for sub in (BIN_DIR_NAME, SRC_DIR_NAME, CACHE_DIR_NAME):
-        shutil.rmtree(install_root() / sub, ignore_errors=True)
+        target = install_root() / sub
+        if target.exists():
+            shutil.rmtree(target, onexc=_on_error)
     # purge leftover atomic-swap temps (do not touch lock file while locked)
     for pat in (f"{BIN_DIR_NAME}.tmp*", f"{BIN_DIR_NAME}.bak*"):
         for p in install_root().glob(pat):
             try:
                 if p.is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
+                    shutil.rmtree(p, onexc=_on_error)
                 else:
                     p.unlink(missing_ok=True)
             except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
-                pass
-    _meta_path().unlink(missing_ok=True)
-    (install_root() / SERVER_PID_FILE_NAME).unlink(missing_ok=True)
-    (install_root() / SERVER_LOG_FILE_NAME).unlink(missing_ok=True)
+                failures.append(str(p))
+    for f in (SERVER_PID_FILE_NAME, SERVER_LOG_FILE_NAME, VERSION_FILE_NAME):
+        p = install_root() / f
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            failures.append(str(p))
+    return failures
