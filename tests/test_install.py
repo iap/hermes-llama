@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -176,17 +177,17 @@ def test_install_upgrades_when_tag_differs():
 
 
 def test_install_skips_source_build():
-    """A source-built install is always current (built from latest master)."""
+    """A source build confirmed current is skipped (no pin, up_to_date=True)."""
     saved = (install.check, install._download_cached, install._build_from_source)
     try:
         install.check = lambda: {
             "installed": True, "binary": "b", "version": "v", "runs": True,
-            "tag": "source", "latest_tag": "b10549", "up_to_date": None,
+            "tag": "source", "latest_tag": "b10549", "up_to_date": True,
             "backend": "cpu", "method": "source",
         }
 
         def _fail_download(*_a, **_k):
-            raise AssertionError("source builds must not re-download")
+            raise AssertionError("a current source build must not re-download or rebuild")
 
         install._download_cached = _fail_download
         install._build_from_source = _fail_download
@@ -194,6 +195,65 @@ def test_install_skips_source_build():
         assert r.get("skipped") is True, r
     finally:
         install.check, install._download_cached, install._build_from_source = saved
+
+
+def test_install_rebuilds_source_when_freshness_unknown():
+    """Unknown source freshness must not count as current.
+
+    Regression: `up_to_date is not False` treated an unavailable probe as
+    up-to-date and skipped the install, keeping a possibly stale binary.
+    """
+    saved = (install.check, install._download_cached, install._build_from_source,
+             install._asset_name)
+    calls = {}
+    try:
+        install.check = lambda: {
+            "installed": True, "binary": "b", "version": "v", "runs": True,
+            "tag": "source", "latest_tag": "b10549", "up_to_date": None,
+            "backend": "cpu", "method": "source",
+        }
+        install._asset_name = lambda tag, backend: None  # no prebuilt -> source path
+
+        def _record_build(backend):
+            calls["built"] = backend
+            return {"ok": True, "method": "source", "detail": "rebuilt"}
+
+        install._build_from_source = _record_build
+        r = install.install(backend="cpu")
+        assert r.get("skipped") is not True, r
+        assert calls.get("built") == "cpu", calls
+    finally:
+        install.check, install._download_cached, install._build_from_source = saved[:3]
+        install._asset_name = saved[3]
+
+
+def test_install_source_does_not_satisfy_version_pin():
+    """An explicit release pin is never satisfied by a source build."""
+    saved = (install.check, install._download_cached, install._build_from_source,
+             install._asset_name, install._macos_ver, install._arch)
+    calls = {}
+    try:
+        install.check = lambda: {
+            "installed": True, "binary": "b", "version": "v", "runs": True,
+            "tag": "source", "latest_tag": "b10549", "up_to_date": True,
+            "backend": "cpu", "method": "source",
+        }
+        install._asset_name = lambda tag, backend: f"llama-{tag}-bin-ubuntu-x64.tar.gz"
+        install._macos_ver = lambda: (14, 0)
+        install._arch = lambda: "x64"
+
+        def _record(tag, asset):
+            calls["tag"] = tag
+            return None  # simulate download failure -> source fallback
+
+        install._download_cached = _record
+        install._build_from_source = lambda backend: {"ok": False, "method": "source", "detail": "stub"}
+        r = install.install(backend="cpu", version="b10540")
+        assert r.get("skipped") is not True, r
+        assert calls.get("tag") == "b10540", calls
+    finally:
+        install.check, install._download_cached, install._build_from_source = saved[:3]
+        install._asset_name, install._macos_ver, install._arch = saved[3:]
 
 
 def test_install_reinstalls_when_backend_differs():
@@ -219,6 +279,190 @@ def test_install_reinstalls_when_backend_differs():
         assert calls.get("tag") == "b10549", calls
     finally:
         install.check, install._download_cached, install._build_from_source = saved
+
+
+def test_uninstall_removes_artifacts_on_py311():
+    """_remove_plugin_artifacts() works on Python < 3.12 (onerror fallback).
+
+    Regression for the rmtree(onexc=...) TypeError: on 3.10/3.11 uninstall
+    raised before deleting anything, leaving bin/, src/, .cache/ behind. We
+    cannot force the interpreter version here, but we can assert the cleanup
+    contract holds on the running interpreter and that no TypeError escapes.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "llama-cpp"
+        (root / "bin").mkdir(parents=True)
+        (root / "src" / "llama.cpp").mkdir(parents=True)
+        (root / ".cache").mkdir(parents=True)
+        (root / "models").mkdir(parents=True)
+        (root / "bin" / "llama-server").write_text("#!/bin/sh\n")
+        (root / "src" / "llama.cpp" / "CMakeLists.txt").write_text("x\n")
+        (root / ".version").write_text('{"tag": "b1234"}')
+        (root / "models" / "sample.gguf").write_text("gguf-bytes")
+        saved = os.environ.get("LLAMA_CPP_INSTALL_DIR")
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = str(root)
+        try:
+            survivors = install._remove_plugin_artifacts()
+            assert survivors == [], survivors
+            remaining = sorted(p.name for p in root.iterdir())
+            assert remaining == ["models"], f"only models/ should survive: {remaining}"
+            assert (root / "models" / "sample.gguf").is_file(), "user GGUFs must survive"
+        finally:
+            if saved is None:
+                os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+            else:
+                os.environ["LLAMA_CPP_INSTALL_DIR"] = saved
+
+
+def test_stop_loaded_server_confirms_shutdown():
+    """_stop_loaded_server() only reports True when the PROCESS is gone.
+
+    Regression for the ignored stop() failure: a failed stop must yield False so
+    callers abort instead of deleting bin/ under a live server. Confirmation must
+    not use _find_loaded_server(), because stop() unlinks the pid file even when
+    the kill failed. The ImportError path (standalone module load) counts as
+    nothing-loaded so uninstall stays usable as the recovery tool.
+    """
+    saved = install._stop_loaded_server
+
+    class _StubModels:
+        def __init__(self, pid, *, alive_after, is_server_after=True, stop_raises=False):
+            self._pid = pid
+            self._alive_after = alive_after
+            self._is_server_after = is_server_after
+            self._stop_raises = stop_raises
+            self.stop_calls = 0
+
+        def _find_loaded_server(self):
+            return self._pid
+
+        def stop(self):
+            self.stop_calls += 1
+            if self._stop_raises:
+                raise RuntimeError("kill failed")
+            return "Stopped."
+
+        # Process-level probes: unaffected by stop() unlinking the pid file.
+        def _pid_alive(self, pid):
+            assert pid == self._pid
+            return self._alive_after
+
+        def _is_llama_server(self, pid):
+            return self._is_server_after
+
+    try:
+        # No loaded server -> True without calling stop().
+        stub = _StubModels(None, alive_after=False)
+        assert install._stop_loaded_server(models_module=stub) is True
+        assert stub.stop_calls == 0
+
+        # Loaded -> stopped -> process gone: True.
+        stub = _StubModels(1234, alive_after=False)
+        assert install._stop_loaded_server(models_module=stub) is True
+        assert stub.stop_calls == 1
+
+        # Loaded -> stop() ran but process STILL ALIVE: False (must abort).
+        # This is the case a _find_loaded_server()-based check would miss.
+        stub = _StubModels(1234, alive_after=True)
+        assert install._stop_loaded_server(models_module=stub) is False
+
+        # Still alive but PID reused by another program -> not our server: True.
+        stub = _StubModels(1234, alive_after=True, is_server_after=False)
+        assert install._stop_loaded_server(models_module=stub) is True
+
+        # Loaded -> stop raises: False.
+        stub = _StubModels(1234, alive_after=True, stop_raises=True)
+        assert install._stop_loaded_server(models_module=stub) is False
+    finally:
+        install._stop_loaded_server = saved
+
+
+def test_uninstall_aborts_when_stop_fails():
+    """uninstall() refuses to delete artifacts when the server won't die."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "llama-cpp"
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "llama-server").write_text("#!/bin/sh\n")
+        (root / ".version").write_text('{"tag": "b1234"}')
+        saved_env = os.environ.get("LLAMA_CPP_INSTALL_DIR")
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = str(root)
+
+        class _FailingModels:
+            @staticmethod
+            def _find_loaded_server():
+                return 4321
+
+            @staticmethod
+            def stop():
+                return "Failed to stop pid 4321: simulated"
+
+            @staticmethod
+            def _pid_alive(pid):
+                return True  # process survives the stop attempt
+
+            @staticmethod
+            def _is_llama_server(pid):
+                return True
+
+        saved_stop = install._stop_loaded_server
+        install._stop_loaded_server = lambda models_module=None: saved_stop(_FailingModels)
+        try:
+            r = install.uninstall()
+            assert r["ok"] is False, r
+            assert "could not be stopped" in r["detail"], r
+            assert (root / "bin" / "llama-server").is_file(), "bin/ must survive an aborted uninstall"
+            assert (root / ".version").is_file(), "metadata must survive an aborted uninstall"
+        finally:
+            install._stop_loaded_server = saved_stop
+            if saved_env is None:
+                os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+            else:
+                os.environ["LLAMA_CPP_INSTALL_DIR"] = saved_env
+
+
+def test_check_reports_stale_source_build():
+    """A source build older than upstream master reports up_to_date=False."""
+    meta = {"tag": "source", "method": "source", "backend": "cpu", "commit": "a" * 40}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            import json as _json
+
+            return _json.dumps({"sha": "b" * 40}).encode()
+
+        headers = {}
+
+    import urllib.request as _ur
+
+    saved_urlopen, saved_meta = _ur.urlopen, install._read_meta
+    saved_latest = install._latest_tag, install._smoke_test, install.find_binary
+    try:
+        install._read_meta = lambda: dict(meta)
+        install._latest_tag = lambda: None
+        install._smoke_test = lambda binary, timeout=30.0: (True, "llama-server version 1")
+        install.find_binary = lambda: "/fake/bin/llama-server"
+        _ur.urlopen = lambda req, timeout=20: _Resp()
+        # fetch_latest=True: the freshness probe is network-backed, mirroring
+        # what install()'s skip check uses. fetch_latest=False is the offline
+        # mode and must stay probe-free (reports unknown).
+        r = install.check()
+        assert r["up_to_date"] is False, r
+        assert r["source_commit"] == "a" * 12, r
+
+        # Same commit as remote head -> current.
+        meta["commit"] = "b" * 40
+        r = install.check()
+        assert r["up_to_date"] is True, r
+    finally:
+        _ur.urlopen = saved_urlopen
+        install._read_meta = saved_meta
+        install._latest_tag, install._smoke_test, install.find_binary = saved_latest
 
 
 def main() -> int:

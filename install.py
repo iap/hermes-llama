@@ -190,6 +190,24 @@ def _write_meta(meta: dict) -> None:
     os.replace(tmp, path)
 
 
+def _source_commit() -> str | None:
+    """Return the current HEAD commit of the source checkout, or None.
+
+    Used by ``check()`` to report source-build freshness honestly. Returns None
+    when there is no checkout or git is unavailable, so callers never raise.
+    """
+    src = install_root() / SRC_DIR_NAME / SRC_REPO_DIR_NAME
+    if not (src / ".git").is_dir():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(src), capture_output=True, text=True, timeout=60
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
 # ── discovery ────────────────────────────────────────────────────────────────
 
 def find_binary() -> Path | None:
@@ -235,7 +253,7 @@ def check(*, fetch_latest: bool = True) -> dict:
         return {
             "installed": False, "binary": None, "version": None, "runs": False,
             "tag": None, "latest_tag": None, "up_to_date": None,
-            "backend": None, "method": None, "detail": str(exc),
+            "backend": None, "method": None, "source_commit": None, "detail": str(exc),
         }
 
 
@@ -248,6 +266,7 @@ def _check_impl(*, fetch_latest: bool = True) -> dict:
         "tag": None,
         "latest_tag": None,
         "up_to_date": None,
+        "source_commit": None,
     }
     binary = find_binary()
     latest = _latest_tag() if fetch_latest else None
@@ -279,10 +298,41 @@ def _check_impl(*, fetch_latest: bool = True) -> dict:
         method = "source"
     result["method"] = method
     if method == "source":
-        result["up_to_date"] = True  # source builds are always built from latest master
+        # Honest freshness for source builds: compare the recorded build commit
+        # against upstream master. Unknown (no commit recorded) stays None
+        # rather than claiming up-to-date; a stale checkout reports False so
+        # upgrade() will actually refresh and rebuild it. The remote-head probe
+        # is network — honor fetch_latest=False (offline/lazy mode reports
+        # unknown instead).
+        remote_head = _source_remote_head() if fetch_latest else None
+        src_commit = meta.get("commit")
+        if isinstance(src_commit, str) and src_commit:
+            result["source_commit"] = src_commit[:12]
+            if remote_head:
+                result["up_to_date"] = src_commit.startswith(remote_head[:12])
+        else:
+            result["up_to_date"] = None if remote_head is None else False
     else:
         result["up_to_date"] = (result["tag"] == latest) if (result["tag"] and latest) else None
     return result
+
+
+def _source_remote_head() -> str | None:
+    """Return the current master commit of the llama.cpp upstream repo.
+
+    Uses the GitHub API (no local checkout required). Returns None when the
+    network or API is unavailable, so callers treat it as "unknown", never as
+    "outdated".
+    """
+    url = f"{GITHUB_API}/repos/{REPO}/commits/master"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode())
+            sha = data.get("sha")
+            return str(sha) if isinstance(sha, str) and sha else None
+    except Exception:  # noqa: BLE001 — offline / rate-limited: freshness unknown
+        return None
 
 
 # ── backend / asset selection ────────────────────────────────────────────────
@@ -539,14 +589,33 @@ def _build_from_source(backend: str) -> dict:
             ),
         }
     src = install_root() / SRC_DIR_NAME / SRC_REPO_DIR_NAME
+    src.parent.mkdir(parents=True, exist_ok=True)
     if not (src / "CMakeLists.txt").is_file():
-        src.parent.mkdir(parents=True, exist_ok=True)
+        # Fresh checkout — clone the full history (not --depth 1) so subsequent
+        # rebuilds can `git fetch` + reset instead of re-cloning from scratch.
         proc = subprocess.run(
-            ["git", "clone", "--depth", "1", f"{GITHUB_BASE}/{REPO}", str(src)],
+            ["git", "clone", f"{GITHUB_BASE}/{REPO}", str(src)],
             capture_output=True, text=True, timeout=600,
         )
         if proc.returncode != 0:
             return {"ok": False, "method": "source", "detail": f"git clone failed: {proc.stderr.strip()[:300]}"}
+    else:
+        # Refresh the existing checkout so a rebuild picks up upstream fixes
+        # rather than reusing a stale local master.
+        for git_args in (
+            ["git", "fetch", "origin"],
+            ["git", "reset", "--hard", "origin/HEAD"],
+        ):
+            proc = subprocess.run(git_args, cwd=str(src), capture_output=True, text=True, timeout=600)
+            if proc.returncode != 0:
+                return {
+                    "ok": False,
+                    "method": "source",
+                    "detail": f"git {' '.join(git_args)} failed: {proc.stderr.strip()[:300]}",
+                }
+    # Record the exact commit we build from so check() can report freshness.
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(src), capture_output=True, text=True, timeout=60)
+    src_commit = proc.stdout.strip() if proc.returncode == 0 else None
     build = src / "build"
     cmake_args = [cmake, "-S", str(src), "-B", str(build)]
     # No embedded web UI: it needs node/npm + a HF download and dominates build
@@ -601,6 +670,13 @@ def _build_from_source(backend: str) -> dict:
                 shutil.rmtree(staging, ignore_errors=True)
                 return {"ok": False, "method": "source", "detail": f"built binary does not run: {info2}"}
             shutil.rmtree(backup, ignore_errors=True)
+            if not _stop_loaded_server():
+                shutil.rmtree(staging, ignore_errors=True)
+                return {
+                    "ok": False,
+                    "method": "source",
+                    "detail": "a running llama-server could not be stopped; stop it manually and retry",
+                }
             swapped = False
             if bin_dir().exists():
                 try:
@@ -635,7 +711,7 @@ def _build_from_source(backend: str) -> dict:
                 shutil.rmtree(staging, ignore_errors=True)
                 return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
             try:
-                _write_meta({"tag": "source", "method": "source", "backend": backend})
+                _write_meta({"tag": "source", "method": "source", "backend": backend, "commit": src_commit})
             except Exception as exc:
                 # restore prior install
                 shutil.rmtree(bin_dir(), ignore_errors=True)
@@ -687,14 +763,18 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
     if not target_tag:
         return {"ok": False, "detail": "Could not determine the latest release tag."}
 
-    # Skip only when the installed backend matches AND (the tag matches, or the
-    # install is a source build — always built from latest master), unless
-    # `force` is set (used by `upgrade`).
+    # Skip only when the installed backend matches AND the tag matches, or the
+    # install is a source build *confirmed* current and no explicit release was
+    # pinned, unless `force` is set (used by `upgrade`).
     if not force:
         is_source = _existing.get("method") == "source"
         same_backend = _existing.get("backend") == backend
         same_tag = _existing.get("tag") == target_tag
-        if _existing["installed"] and _existing["runs"] and same_backend and (same_tag or is_source):
+        # Unknown freshness (probe unavailable) must not count as current, and a
+        # source build never satisfies an explicit version pin: it carries no
+        # release tag, so skipping would silently ignore the requested tag.
+        source_current = is_source and not version and _existing.get("up_to_date") is True
+        if _existing["installed"] and _existing["runs"] and same_backend and (same_tag or source_current):
             return {
                 "ok": True,
                 "skipped": True,
@@ -730,6 +810,13 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                                 ),
                             }
                         shutil.rmtree(backup, ignore_errors=True)
+                        if not _stop_loaded_server():
+                            shutil.rmtree(staging, ignore_errors=True)
+                            return {
+                                "ok": False,
+                                "method": "prebuilt",
+                                "detail": "a running llama-server could not be stopped; stop it manually and retry",
+                            }
                         swapped = False
                         if bin_dir().exists():
                             try:
@@ -791,6 +878,42 @@ def upgrade(backend: str | None = None) -> dict:
     return install(backend=backend, force=True)
 
 
+def _stop_loaded_server(models_module=None) -> bool:
+    """Stop a loaded llama-server and report whether removal is now safe.
+
+    Used by uninstall and the atomic-swap paths so we never remove ``bin/`` out
+    from under a live server. Returns True when no server is loaded, or when a
+    loaded server was stopped and ``_find_loaded_server()`` confirms it is
+    gone. Returns False only when a loaded server could NOT be confirmed
+    stopped — callers must then abort the removal/swap rather than delete
+    ``bin/`` under a live process.
+
+    ``models_module`` is an injection seam for tests; production callers omit
+    it. The lazy ``from . import models`` fails when this file is loaded
+    standalone (e.g. by the test harness) or when the plugin install is
+    corrupted; in both cases there is no functioning sibling to have started a
+    managed server, so it counts as "nothing loaded" — uninstall stays usable
+    as the recovery path instead of bricking.
+    """
+    if models_module is None:
+        try:
+            from . import models as _models
+        except ImportError:
+            return True
+        models_module = _models
+    try:
+        pid = models_module._find_loaded_server()
+        if pid is None:
+            return True
+        models_module.stop()
+        # Confirm against the PROCESS, not the PID file: stop() unlinks the pid
+        # file even when the kill did not take effect, so _find_loaded_server()
+        # would report "gone" for a server that is still running.
+        return not (models_module._pid_alive(pid) and models_module._is_llama_server(pid))
+    except Exception:  # noqa: BLE001 — shutdown could not be confirmed
+        return False
+
+
 def uninstall() -> dict:
     """Remove the plugin-managed llama.cpp install. Never raises.
 
@@ -806,32 +929,83 @@ def uninstall() -> dict:
 
 
 def _uninstall_impl() -> dict:
-    binary = find_binary()
-    if binary is not None and binary.is_relative_to(bin_dir()):
-        _remove_plugin_artifacts()
+    # Ownership is decided by layout, not by PATH: the plugin owns the install
+    # iff its bin/<SERVER_BIN> exists or its .version metadata exists. A
+    # llama-server installed elsewhere on PATH (e.g. a system-wide copy the
+    # user also has) must not make us refuse to manage our own install.
+    ours = (bin_dir() / SERVER_BIN).is_file() or _meta_path().is_file()
+    if ours:
+        # Never remove bin/ out from under a live server: abort unless shutdown
+        # is confirmed (no loaded server, or stop verified it is gone).
+        if not _stop_loaded_server():
+            return {
+                "ok": False,
+                "detail": "A running llama-server could not be stopped; uninstall aborted. Stop it manually and retry.",
+            }
+        survivors = _remove_plugin_artifacts()
+        # Final integrity check: the bin dir must actually be gone.
+        if bin_dir().exists():
+            survivors.append(str(bin_dir()))
+        if survivors:
+            return {
+                "ok": False,
+                "detail": "Uninstall incomplete; could not remove: " + "; ".join(sorted(set(survivors))),
+            }
         return {"ok": True, "detail": f"Removed plugin-managed llama.cpp (models kept at {models_dir()})."}
-    if binary is not None:
+    # Not ours. If a llama-server exists elsewhere on PATH, say so; otherwise
+    # there is simply nothing to remove.
+    if find_binary() is not None:
         return {
             "ok": False,
             "detail": "llama-server was not installed by hermes-llama; remove it with the tool that installed it.",
         }
-    _remove_plugin_artifacts()
     return {"ok": True, "detail": "Nothing installed; cleared plugin artifacts (models kept)."}
 
 
-def _remove_plugin_artifacts() -> None:
+def _rmtree_collecting(path, failures: list) -> None:
+    """``shutil.rmtree`` that records unremovable paths instead of raising.
+
+    Prefers the ``onexc`` hook (Python 3.12+) and falls back to ``onerror``
+    (Python 3.11 and earlier); both share the same callback signature, only the
+    keyword name differs. The ``TypeError`` from an unsupported keyword fires
+    before any deletion happens, so the retry never double-deletes.
+    """
+
+    def _record(_func, path_str, _excinfo):
+        failures.append(str(path_str))
+
+    try:
+        shutil.rmtree(path, onexc=_record)
+    except TypeError:
+        shutil.rmtree(path, onerror=_record)
+
+
+def _remove_plugin_artifacts() -> list[str]:
+    """Remove plugin-managed artifacts; never raises.
+
+    Returns a list of survivor paths that could not be removed. The caller
+    reports these so uninstall surfaces a real failure instead of silently
+    succeeding.
+    """
+    failures: list[str] = []
     for sub in (BIN_DIR_NAME, SRC_DIR_NAME, CACHE_DIR_NAME):
-        shutil.rmtree(install_root() / sub, ignore_errors=True)
+        target = install_root() / sub
+        if target.exists():
+            _rmtree_collecting(target, failures)
     # purge leftover atomic-swap temps (do not touch lock file while locked)
     for pat in (f"{BIN_DIR_NAME}.tmp*", f"{BIN_DIR_NAME}.bak*"):
         for p in install_root().glob(pat):
             try:
                 if p.is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
+                    _rmtree_collecting(p, failures)
                 else:
                     p.unlink(missing_ok=True)
             except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
-                pass
-    _meta_path().unlink(missing_ok=True)
-    (install_root() / SERVER_PID_FILE_NAME).unlink(missing_ok=True)
-    (install_root() / SERVER_LOG_FILE_NAME).unlink(missing_ok=True)
+                failures.append(str(p))
+    for f in (SERVER_PID_FILE_NAME, SERVER_LOG_FILE_NAME, VERSION_FILE_NAME):
+        p = install_root() / f
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            failures.append(str(p))
+    return failures
