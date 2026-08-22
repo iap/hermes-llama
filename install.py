@@ -279,7 +279,22 @@ def _check_impl(*, fetch_latest: bool = True) -> dict:
         method = "source"
     result["method"] = method
     if method == "source":
-        result["up_to_date"] = True  # source builds are always built from latest master
+        # Source builds are only "up to date" if the recorded built commit still
+        # matches the checkout's HEAD. Previously this hard-coded True (M1), so
+        # `upgrade` was a permanent no-op on every source-build host.
+        built_commit = meta.get("commit")
+        if built_commit:
+            try:
+                head = subprocess.run(
+                    ["git", "-C", str(install_root() / SRC_DIR_NAME / SRC_REPO_DIR_NAME), "rev-parse", "HEAD"],
+                    capture_output=True, text=True, timeout=30,
+                ).stdout.strip()
+                result["up_to_date"] = (head == built_commit)
+            except Exception:  # noqa: BLE001 — cannot resolve HEAD -> unknown
+                result["up_to_date"] = None
+        else:
+            # No recorded commit (pre-M1 metadata): we cannot honestly claim current.
+            result["up_to_date"] = None
     else:
         result["up_to_date"] = (result["tag"] == latest) if (result["tag"] and latest) else None
     return result
@@ -547,6 +562,22 @@ def _build_from_source(backend: str) -> dict:
         )
         if proc.returncode != 0:
             return {"ok": False, "method": "source", "detail": f"git clone failed: {proc.stderr.strip()[:300]}"}
+    else:
+        # A cached checkout exists but may be stale. Refresh it (M1) so `upgrade`
+        # actually rebuilds the latest source instead of reusing a frozen shallow
+        # clone forever. Best-effort: if the fetch/reset fails we fall back to the
+        # existing source rather than aborting the whole build.
+        try:
+            subprocess.run(
+                ["git", "-C", str(src), "fetch", "--depth", "1", "origin", "HEAD"],
+                capture_output=True, text=True, timeout=600, check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(src), "reset", "--hard", "FETCH_HEAD"],
+                capture_output=True, text=True, timeout=600, check=True,
+            )
+        except Exception:  # noqa: BLE001 — refresh is best-effort; use existing source
+            pass
     build = src / "build"
     cmake_args = [cmake, "-S", str(src), "-B", str(build)]
     # No embedded web UI: it needs node/npm + a HF download and dominates build
@@ -580,6 +611,16 @@ def _build_from_source(backend: str) -> dict:
     server_dir = _find_server_dir(build)
     if server_dir is None:
         return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
+    # Record the exact source commit we built from so `check()` can later report
+    # honestly whether an upgrade is available (M1).
+    commit = ""
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(src), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001 — commit capture is best-effort
+        pass
     # Locked, unique staging -> atomic swap with restore on any failure
     with _install_lock():
         staging, backup = _unique_names()
@@ -638,7 +679,7 @@ def _build_from_source(backend: str) -> dict:
                 shutil.rmtree(staging, ignore_errors=True)
                 return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
             try:
-                _write_meta({"tag": "source", "method": "source", "backend": backend})
+                _write_meta({"tag": "source", "method": "source", "backend": backend, "commit": commit})
             except Exception as exc:
                 # restore prior install
                 shutil.rmtree(bin_dir(), ignore_errors=True)
