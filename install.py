@@ -806,16 +806,21 @@ def uninstall() -> dict:
 
 
 def _uninstall_impl() -> dict:
-    binary = find_binary()
-    if binary is not None and binary.is_relative_to(bin_dir()):
+    # Ownership is decided by layout, not by PATH: the plugin owns the install
+    # iff its bin/<SERVER_BIN> exists or its .version metadata exists. A
+    # llama-server installed elsewhere on PATH (e.g. a system-wide copy the
+    # user also has) must not make us refuse to manage our own install.
+    ours = (bin_dir() / SERVER_BIN).is_file() or _meta_path().is_file()
+    if ours:
         _remove_plugin_artifacts()
         return {"ok": True, "detail": f"Removed plugin-managed llama.cpp (models kept at {models_dir()})."}
-    if binary is not None:
+    # Not ours. If a llama-server exists elsewhere on PATH, say so; otherwise
+    # there is simply nothing to remove.
+    if find_binary() is not None:
         return {
             "ok": False,
             "detail": "llama-server was not installed by hermes-llama; remove it with the tool that installed it.",
         }
-    _remove_plugin_artifacts()
     return {"ok": True, "detail": "Nothing installed; cleared plugin artifacts (models kept)."}
 
 
