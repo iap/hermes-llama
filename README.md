@@ -88,10 +88,14 @@ Environment variables (override plugin defaults):
 | `LLAMA_CPP_GITHUB_API_BASE` | `https://api.github.com` | GitHub API base (for GitHub Enterprise) |
 | `LLAMA_CPP_HF_ENDPOINT` | `https://huggingface.co` | Hugging Face endpoint (for mirrors) |
 
-> The same keys are also settable as Hermes plugin settings
-> (`hermes config` → `plugins.entries.hermes-llama.settings.*`, mirroring the
-> `config_schema` in `plugin.yaml`). An explicitly-set `LLAMA_CPP_*` environment
-> variable takes precedence over the Hermes setting.
+> The schema keys (`base_url`, `host`, `port`, `ctx_size`, `n_gpu_layers`,
+> `parallel`, `install_dir`, `backend`, `version`, `models_dir`, `api_key`) are
+> also settable as Hermes plugin settings (`hermes config` →
+> `plugins.entries.hermes-llama.settings.*`, mirroring `config_schema` in
+> `plugin.yaml`). Enterprise/mirror overrides (`LLAMA_CPP_GITHUB_BASE`,
+> `LLAMA_CPP_GITHUB_API_BASE`, `LLAMA_CPP_HF_ENDPOINT`) remain env-only.
+> An explicitly-set `LLAMA_CPP_*` environment variable takes precedence over the
+> Hermes setting.
 
 ## Platform notes
 
