@@ -195,10 +195,20 @@ def _download_model(url: str, dest: Path) -> None:
             expected = None
             try:
                 head = subprocess.run([curl, "-sI", "-L", url], capture_output=True, text=True, timeout=20).stdout
+                x_linked = None
                 for line in head.splitlines():
-                    if line.lower().startswith("content-length:"):
-                        expected = int(line.split(":", 1)[1].strip())
+                    if line.lower().startswith("x-linked-size:"):
+                        x_linked = int(line.split(":", 1)[1].strip())
                         break
+                if x_linked is not None:
+                    expected = x_linked
+                else:
+                    for line in head.splitlines():
+                        if line.lower().startswith("content-length:"):
+                            v = int(line.split(":", 1)[1].strip())
+                            if v > 1024 * 1024:
+                                expected = v
+                            break
             except Exception:
                 pass
             if expected is not None and tmp.stat().st_size != expected:
@@ -211,9 +221,13 @@ def _download_model(url: str, dest: Path) -> None:
                 raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
             expected_len = None
             try:
-                raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+                raw = resp.headers.get("X-Linked-Size") if hasattr(resp, "headers") else None
                 if raw:
                     expected_len = int(str(raw).strip())
+                else:
+                    raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+                    if raw and int(str(raw).strip()) > 1024 * 1024:
+                        expected_len = int(str(raw).strip())
             except Exception:
                 pass
             shutil.copyfileobj(resp, out, length=1024 * 1024)
