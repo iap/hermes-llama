@@ -188,11 +188,34 @@ def _download_model(url: str, dest: Path) -> None:
             )
             if proc.returncode != 0:
                 raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]}")
+            expected = None
+            try:
+                head = subprocess.run([curl, "-sI", "-L", url], capture_output=True, text=True, timeout=20).stdout
+                for line in head.splitlines():
+                    if line.lower().startswith("content-length:"):
+                        expected = int(line.split(":", 1)[1].strip())
+                        break
+            except Exception:
+                pass
+            if expected is not None and tmp.stat().st_size != expected:
+                raise RuntimeError(f"download truncated: expected {expected} bytes, got {tmp.stat().st_size}")
             os.replace(tmp, dest)
             return
         req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
         with urllib.request.urlopen(req, timeout=3600) as resp, open(tmp, "wb") as out:
-            shutil.copyfileobj(resp, out)
+            if getattr(resp, "status", 200) != 200:
+                raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
+            expected_len = None
+            try:
+                raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+                if raw:
+                    expected_len = int(str(raw).strip())
+            except Exception:
+                pass
+            shutil.copyfileobj(resp, out, length=1024 * 1024)
+            out.flush()
+            if expected_len is not None and tmp.stat().st_size != expected_len:
+                raise RuntimeError(f"download truncated: Content-Length {expected_len}, got {tmp.stat().st_size}")
         os.replace(tmp, dest)
     except Exception:
         tmp.unlink(missing_ok=True)

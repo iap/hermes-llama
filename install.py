@@ -557,9 +557,42 @@ def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
     tmp = dest.with_suffix(dest.suffix + ".part")
+    curl = shutil.which("curl")
     try:
+        if curl:
+            proc = subprocess.run(
+                [curl, "-L", "--fail", "--retry", "3", "--retry-delay", "2",
+                 "--retry-all-errors", "-C", "-", "-A", "hermes-llama", "-o", str(tmp), url],
+                capture_output=True, text=True, timeout=600,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]} (exit {proc.returncode})")
+            expected = None
+            try:
+                head = subprocess.run([curl, "-sI", "-L", url], capture_output=True, text=True, timeout=20).stdout
+                for line in head.splitlines():
+                    if line.lower().startswith("content-length:"):
+                        expected = int(line.split(":", 1)[1].strip())
+                        break
+            except Exception:
+                pass
+            if expected is not None and tmp.stat().st_size != expected:
+                raise RuntimeError(f"download truncated: expected {expected} bytes, got {tmp.stat().st_size}")
+            os.replace(tmp, dest)
+            return
         with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as out:
-            shutil.copyfileobj(resp, out)
+            if getattr(resp, "status", 200) != 200:
+                raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
+            expected_len = None
+            try:
+                raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+                if raw: expected_len = int(str(raw).strip())
+            except Exception:
+                pass
+            shutil.copyfileobj(resp, out, length=1024 * 1024)
+            out.flush()
+            if expected_len is not None and tmp.stat().st_size != expected_len:
+                raise RuntimeError(f"download truncated: Content-Length {expected_len}, got {tmp.stat().st_size}")
         os.replace(tmp, dest)
     except Exception:
         tmp.unlink(missing_ok=True)
