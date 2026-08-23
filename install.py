@@ -34,16 +34,25 @@ from contextlib import contextmanager
 
 REPO = "ggml-org/llama.cpp"
 # Endpoints — env-overridable for GitHub Enterprise / HF mirror deployments.
-GITHUB_BASE = os.environ.get("LLAMA_CPP_GITHUB_BASE", "https://github.com").rstrip("/")
-GITHUB_API_BASE = os.environ.get("LLAMA_CPP_GITHUB_API_BASE", "https://api.github.com").rstrip("/")
+# Read at call time (not import) so _wire_config can set them from Hermes
+# settings after this module is imported.
+
+
+def _github_base() -> str:
+    return os.environ.get("LLAMA_CPP_GITHUB_BASE", "https://github.com").rstrip("/")
+
+
+def _github_api_base() -> str:
+    return os.environ.get("LLAMA_CPP_GITHUB_API_BASE", "https://api.github.com").rstrip("/")
 
 
 def _github_api() -> str:
-    """GitHub API base for this repo (derived fresh so env overrides after import apply)."""
-    return f"{GITHUB_API_BASE}/repos/{REPO}"
+    """API base for this repo; derived per call so late env overrides apply."""
+    return f"{_github_api_base()}/repos/{REPO}"
 
 
-# Back-compat alias used by older call sites; prefer _github_api().
+# Back-compat aliases; prefer the functions.
+GITHUB_BASE = _github_base()
 GITHUB_API = _github_api()
 
 SERVER_BIN = "llama-server.exe" if sys.platform == "win32" else "llama-server"
@@ -430,7 +439,7 @@ def _source_remote_head() -> str | None:
                     return sha
     except Exception:
         pass
-    url = f"{_github_api()}/repos/{REPO}/commits/master"
+    url = _github_api() + "/commits/master"
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -649,7 +658,7 @@ def _download_cached(tag: str, asset: str) -> Path | None:
     dest = cache / f"{tag}-{asset}"
     if dest.is_file() and dest.stat().st_size > 0:
         return dest
-    url = f"{GITHUB_BASE}/{REPO}/releases/download/{tag}/{asset}"
+    url = f"{_github_base()}/{REPO}/releases/download/{tag}/{asset}"
     try:
         _download(url, dest)
         return dest if dest.stat().st_size > 0 else None
@@ -730,7 +739,7 @@ def _build_from_source(backend: str) -> dict:
             "detail": (
                 "No prebuilt binary matches this host and CMake is not installed. "
                 "Run `python3 -m pip install cmake` (or install CMake), then retry. "
-                f"Or: git clone {GITHUB_BASE}/{REPO} && cmake -B build "
+                f"Or: git clone {_github_base()}/{REPO} && cmake -B build "
                 "&& cmake --build build --config Release -j"
             ),
         }
@@ -740,7 +749,7 @@ def _build_from_source(backend: str) -> dict:
         # Fresh checkout — clone the full history (not --depth 1) so subsequent
         # rebuilds can `git fetch` + reset instead of re-cloning from scratch.
         proc = subprocess.run(
-            ["git", "clone", f"{GITHUB_BASE}/{REPO}", str(src)],
+            ["git", "clone", f"{_github_base()}/{REPO}", str(src)],
             capture_output=True, text=True, timeout=600,
         )
         if proc.returncode != 0:
