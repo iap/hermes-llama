@@ -12,6 +12,7 @@ Subcommands: check, install, uninstall, status, models, pull, serve, stop, help.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from . import install, models, provider
@@ -185,4 +186,23 @@ def register(ctx: Any) -> None:
         )
     except Exception:
         # CLI command registration is optional; slash command remains available.
+        pass
+
+    # 4. Bundled skill. Plugin skills are explicit opt-in loads — they do not
+    #    enter ~/.hermes/skills/ and are not listed in the system prompt — so
+    #    this costs no prompt budget and makes the playbook reachable as
+    #    `skill_view(name="hermes-llama:llama-cpp-local-models")`.
+    try:
+        skill_path = Path(__file__).resolve().parent / "skills" / "llama-cpp-local-models" / "SKILL.md"
+        if skill_path.is_file():
+            ctx.register_skill(
+                "llama-cpp-local-models",
+                path=skill_path,
+                description=(
+                    "Install/remove llama.cpp, pull GGUF models, and serve them "
+                    "locally through the 'Llama CPP' provider."
+                ),
+            )
+    except Exception:
+        # Older Hermes builds have no register_skill; the plugin still works.
         pass
