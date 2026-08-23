@@ -32,6 +32,31 @@ def _load_install():
 install = _load_install()
 
 
+def _load_models():
+    """Load models.py with a synthetic package so ``from . import install`` works.
+
+    models.py is not stdlib-only in the import sense — it does a relative
+    import of its sibling. We build a throwaway package namespace rather than
+    installing the plugin, keeping the suite dependency-free.
+    """
+    import types
+
+    pkg_name = "hermes_llama_pkg"
+    pkg = types.ModuleType(pkg_name)
+    pkg.__path__ = [str(_REPO_ROOT)]
+    sys.modules[pkg_name] = pkg
+    sys.modules[f"{pkg_name}.install"] = install
+
+    spec = importlib.util.spec_from_file_location(
+        f"{pkg_name}.models", _REPO_ROOT / "models.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[f"{pkg_name}.models"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class _Platform:
     """Scoped override of install.py's platform probes (restored on exit)."""
 
@@ -532,6 +557,63 @@ def test_wire_config_derives_base_url():
         for n, v in saved.items():
             _os.environ.pop(n, None)
             if v is not None: _os.environ[n] = v
+
+def test_presets_are_wellformed():
+    """Every preset has the keys pull()/serve() read, and unique aliases.
+
+    Guards the class of bug where a new catalog entry is missing a field or
+    silently collides with an existing alias (which would make /v1/models
+    ambiguous).
+    """
+    models = _load_models()
+    presets = models.LIQUIDAI_PRESETS
+    assert presets, "preset catalog is empty"
+    aliases = []
+    for key, p in presets.items():
+        for field in ("alias", "repo", "file", "size_gb", "note"):
+            assert field in p, f"preset '{key}' missing '{field}'"
+        assert p["file"].endswith(".gguf"), f"preset '{key}' file is not a .gguf"
+        assert "/" in p["repo"], f"preset '{key}' repo is not Org/Repo"
+        assert isinstance(p["size_gb"], (int, float)) and p["size_gb"] > 0
+        aliases.append(p["alias"])
+    assert len(aliases) == len(set(aliases)), f"duplicate aliases: {aliases}"
+    # At least one permissively-licensed option must ship.
+    assert any("Qwen/" in p["repo"] or "SmolLM2" in p["repo"] for p in presets.values())
+
+
+def test_settings_cpu_tuning_defaults_and_overrides():
+    """_settings() exposes the CPU-tuning knobs and honours env overrides."""
+    models = _load_models()
+    keys = ("LLAMA_CPP_THREADS", "LLAMA_CPP_CACHE_TYPE_K",
+            "LLAMA_CPP_CACHE_TYPE_V", "LLAMA_CPP_JINJA")
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        for k in keys:
+            os.environ.pop(k, None)
+        s = models._settings()
+        assert s["cache_type_k"] == "q8_0", s
+        assert s["cache_type_v"] == "q8_0", s
+        assert s["jinja"] is True, s
+        assert isinstance(s["threads"], int) and s["threads"] >= 0, s
+
+        os.environ["LLAMA_CPP_CACHE_TYPE_K"] = "f16"
+        os.environ["LLAMA_CPP_JINJA"] = "false"
+        os.environ["LLAMA_CPP_THREADS"] = "3"
+        s = models._settings()
+        assert s["cache_type_k"] == "f16", s
+        assert s["jinja"] is False, s
+        assert s["threads"] == 3, s
+
+        # Garbage int must not raise — falls back to the detected default.
+        os.environ["LLAMA_CPP_THREADS"] = "not-a-number"
+        assert isinstance(models._settings()["threads"], int)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
 
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

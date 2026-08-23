@@ -115,6 +115,10 @@ _CONFIG_ENV = {
     "models_dir": "LLAMA_CPP_MODELS_DIR",
     "api_key": "LLAMA_CPP_API_KEY",
     "github_base": "LLAMA_CPP_GITHUB_BASE",
+    "threads": "LLAMA_CPP_THREADS",
+    "cache_type_k": "LLAMA_CPP_CACHE_TYPE_K",
+    "cache_type_v": "LLAMA_CPP_CACHE_TYPE_V",
+    "jinja": "LLAMA_CPP_JINJA",
 }
 
 

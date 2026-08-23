@@ -54,18 +54,28 @@ hermes plugins install iap/hermes-llama --enable
 
 The same subcommands are available in a terminal as `hermes llama <sub> …`.
 
-## Sample model — LiquidAI
+## Sample models
 
-| Alias | Repo / file | Size | Note |
-|---|---|---|---|
-| `liquidai` | `LiquidAI/LFM2-1.2B-GGUF` · `LFM2-1.2B-Q4_K_M.gguf` | 0.68 GB | **Default** — best fit for 8 GB RAM, CPU-only |
-| `liquidai-350m` | `LiquidAI/LFM2-350M-GGUF` · `LFM2-350M-Q4_K_M.gguf` | 0.21 GB | Ultra-light edge model |
-| `liquidai-2.6b` | `LiquidAI/LFM2-2.6B-GGUF` · `LFM2-2.6B-Q4_K_M.gguf` | 1.46 GB | Stronger, slower on a 2-core CPU |
-| `liquidai-2.5` | `LiquidAI/LFM2.5-2.6B-GGUF` · `LFM2.5-2.6B-Q4_K_M.gguf` | 1.56 GB | Most-downloaded LiquidAI GGUF |
+| Alias | Repo / file | Size | Licence | Note |
+|---|---|---|---|---|
+| `liquidai` | `LiquidAI/LFM2-1.2B-GGUF` · `LFM2-1.2B-Q4_K_M.gguf` | 0.68 GB | LFM v1.0 | **Default** — best fit for 8 GB RAM, CPU-only |
+| `liquidai-350m` | `LiquidAI/LFM2-350M-GGUF` · `LFM2-350M-Q4_K_M.gguf` | 0.21 GB | LFM v1.0 | Ultra-light edge model |
+| `liquidai-2.6b` | `LiquidAI/LFM2-2.6B-GGUF` · `LFM2-2.6B-Q4_K_M.gguf` | 1.46 GB | LFM v1.0 | Stronger, slower on a 2-core CPU |
+| `liquidai-2.5` | `LiquidAI/LFM2.5-2.6B-GGUF` · `LFM2.5-2.6B-Q4_K_M.gguf` | 1.56 GB | LFM v1.0 | Most-downloaded LiquidAI GGUF |
+| `qwen2.5-1.5b` | `Qwen/Qwen2.5-1.5B-Instruct-GGUF` · `qwen2.5-1.5b-instruct-q4_k_m.gguf` | 1.04 GB | Apache-2.0 | Permissive general instruct; tool-calling via `--jinja` |
+| `qwen2.5-coder-1.5b` | `Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF` · `qwen2.5-coder-1.5b-instruct-q4_k_m.gguf` | 1.04 GB | Apache-2.0 | Permissive code-focused instruct |
+| `smollm2-1.7b` | `bartowski/SmolLM2-1.7B-Instruct-GGUF` · `SmolLM2-1.7B-Instruct-Q4_K_M.gguf` | 0.98 GB | Apache-2.0 | Smallest permissive option; chat-oriented |
 
-> **License:** LiquidAI models use the **LFM Open License v1.0** — non-commercial
-> research use; commercial use limited to non-profits and entities under
-> US$10M annual revenue. Review `LICENSE` in the model repo before commercial use.
+> **Licences differ.** LiquidAI models use the **LFM Open License v1.0** —
+> non-commercial research use; commercial use limited to non-profits and
+> entities under US$10M annual revenue. The Qwen2.5 and SmolLM2 presets are
+> **Apache-2.0** and carry no such restriction. Review the `LICENSE` in the
+> model repo before commercial use.
+
+> **Tool-calling.** `--jinja` is passed by default, which loads the model's own
+> chat template and enables OpenAI-style `tools` / `tool_calls`. At the 1.5B
+> scale, `tool_choice: "required"` is far more reliable than `"auto"` — a small
+> model given `"auto"` will often answer in prose instead of emitting a call.
 
 ## Configuration
 
@@ -84,16 +94,21 @@ Environment variables (override plugin defaults):
 | `LLAMA_CPP_INSTALL_DIR` | `$HERMES_HOME/llama-cpp` | Root dir for the plugin-managed install |
 | `LLAMA_CPP_MODELS_DIR` | `$HERMES_HOME/llama-cpp/models` | Where GGUF models are stored |
 | `LLAMA_CPP_API_KEY` | *(empty)* | Optional `--api-key` / Bearer |
+| `LLAMA_CPP_THREADS` | *(physical cores)* | `--threads` / `--threads-batch`; `0` = let llama.cpp choose |
+| `LLAMA_CPP_CACHE_TYPE_K` | `q8_0` | `--cache-type-k` (`f16` for max quality, `q8_0` halves cache RAM) |
+| `LLAMA_CPP_CACHE_TYPE_V` | `q8_0` | `--cache-type-v` |
+| `LLAMA_CPP_JINJA` | `true` | Pass `--jinja` (loads the model's chat template; needed for tool-calling) |
 | `LLAMA_CPP_GITHUB_BASE` | `https://github.com` | GitHub download/clone base (for GitHub Enterprise) |
 | `LLAMA_CPP_GITHUB_API_BASE` | `https://api.github.com` | GitHub API base (for GitHub Enterprise) |
 | `LLAMA_CPP_HF_ENDPOINT` | `https://huggingface.co` | Hugging Face endpoint (for mirrors) |
 
 > The schema keys (`base_url`, `host`, `port`, `ctx_size`, `n_gpu_layers`,
-> `parallel`, `install_dir`, `backend`, `version`, `models_dir`, `api_key`) are
+> `parallel`, `install_dir`, `backend`, `version`, `models_dir`, `api_key`,
+> `github_base`, `threads`, `cache_type_k`, `cache_type_v`, `jinja`) are
 > also settable as Hermes plugin settings (`hermes config` →
 > `plugins.entries.hermes-llama.settings.*`, mirroring `config_schema` in
-> `plugin.yaml`). Enterprise/mirror overrides (`LLAMA_CPP_GITHUB_BASE`,
-> `LLAMA_CPP_GITHUB_API_BASE`, `LLAMA_CPP_HF_ENDPOINT`) remain env-only.
+> `plugin.yaml`). The remaining mirror overrides
+> (`LLAMA_CPP_GITHUB_API_BASE`, `LLAMA_CPP_HF_ENDPOINT`) are env-only.
 > An explicitly-set `LLAMA_CPP_*` environment variable takes precedence over the
 > Hermes setting.
 
