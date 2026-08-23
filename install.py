@@ -21,6 +21,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -83,13 +84,15 @@ def _is_macos() -> bool:
 
 
 @contextmanager
-def _install_lock(timeout: float = 30.0):
-    """Interprocess lock for install root, stdlib-only (fcntl/msvcrt).
+def _file_lock(lock_path: Path, timeout: float = 30.0):
+    """Interprocess advisory lock on *lock_path*, stdlib-only (fcntl/msvcrt).
 
     POSIX path polls with LOCK_NB so a hung holder (e.g. stalled cmake) does
     not block uninstall/install forever; Windows already has NBLCK semantics.
+
+    Generic on the path so callers can guard distinct resources (the install
+    root, the model registry) without contending on a single global lock.
     """
-    lock_path = install_root() / ".install.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fh = None
     try:
@@ -104,7 +107,7 @@ def _install_lock(timeout: float = 30.0):
                     msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
                 except OSError as exc:
                     fh.close()
-                    raise RuntimeError(f"install lock failed: {exc}") from exc
+                    raise RuntimeError(f"lock failed on {lock_path.name}: {exc}") from exc
         else:
             try:
                 import fcntl
@@ -117,14 +120,15 @@ def _install_lock(timeout: float = 30.0):
                         if time.time() >= deadline:
                             fh.close()
                             raise RuntimeError(
-                                f"install lock held — another install/upgrade is running (waited {timeout:.0f}s)"
+                                f"{lock_path.name} held — another operation is running "
+                                f"(waited {timeout:.0f}s)"
                             ) from None
                         time.sleep(0.1)
             except RuntimeError:
                 raise
             except Exception as exc:
                 fh.close()
-                raise RuntimeError(f"install lock failed: {exc}") from exc
+                raise RuntimeError(f"lock failed on {lock_path.name}: {exc}") from exc
         yield
     finally:
         if fh is not None:
@@ -147,6 +151,25 @@ def _install_lock(timeout: float = 30.0):
                     fh.close()
                 except Exception:  # noqa: BLE001 — best-effort close
                     pass
+
+
+@contextmanager
+def _install_lock(timeout: float = 30.0):
+    """Interprocess lock guarding the install root (bin/, src/, metadata)."""
+    with _file_lock(install_root() / ".install.lock", timeout=timeout):
+        yield
+
+
+@contextmanager
+def registry_lock(timeout: float = 30.0):
+    """Interprocess lock guarding the model registry (models.json).
+
+    Public because ``models.py`` owns the registry but this module owns the
+    locking primitive. Separate from the install lock so a long source build
+    never blocks a model pull, and vice versa.
+    """
+    with _file_lock(install_root() / ".registry.lock", timeout=timeout):
+        yield
 
 
 def _unique_names() -> tuple[Path, Path]:
@@ -688,12 +711,22 @@ def _extract(archive: Path, dest: Path) -> None:
     elif archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
             for member in zf.infolist():
+                # Reject symlinks BEFORE extracting anything. Validating paths
+                # alone is not enough: a symlink member (`x -> /`) passes the
+                # containment check because it does not exist yet, and a later
+                # regular member (`x/evil`) then writes through it. The tar
+                # branch already rejects link members; keep the two symmetric.
+                mode = member.external_attr >> 16
+                if stat.S_ISLNK(mode):
+                    raise RuntimeError(f"Blocked zip symlink member: {member.filename}")
                 target = (dest / member.filename).resolve()
                 try:
                     target.relative_to(dest.resolve())
                 except ValueError:
                     raise RuntimeError(f"Blocked zip member with traversal: {member.filename}")
-            zf.extractall(dest)
+            # Extract per member (not extractall) so the vetted list is what lands.
+            for member in zf.infolist():
+                zf.extract(member, dest)
 
 
 def _find_server_dir(root: Path) -> Path | None:

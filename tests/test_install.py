@@ -894,6 +894,153 @@ def test_download_model_rejects_bad_checksum():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_extract_rejects_zip_symlink():
+    """The zip branch refuses symlink members, matching the tar branch.
+
+    Scope note, established by experiment: stdlib ``zipfile.extractall`` does
+    NOT honour the symlink bit — it writes such a member as a regular file
+    containing the target path — so this is defence-in-depth parity with the tar
+    branch (which already rejects link members), not a patched live exploit.
+    The guard also means only vetted members are ever written.
+    """
+    import stat as _stat
+    import zipfile as _zip
+
+    tmpdir = tempfile.mkdtemp(prefix="llama-zipsym-")
+    try:
+        archive = Path(tmpdir) / "evil.zip"
+        outside = Path(tmpdir) / "outside"
+        outside.mkdir()
+        dest = Path(tmpdir) / "dest"
+        dest.mkdir()
+
+        with _zip.ZipFile(archive, "w") as zf:
+            info = _zip.ZipInfo("link")
+            info.create_system = 3  # unix
+            info.external_attr = (_stat.S_IFLNK | 0o777) << 16
+            zf.writestr(info, str(outside))
+            zf.writestr("link/pwned.txt", "payload")
+
+        try:
+            install._extract(archive, dest)
+        except RuntimeError as exc:
+            assert "symlink" in str(exc).lower(), exc
+        else:
+            raise AssertionError("zip symlink member was NOT rejected")
+
+        # Nothing may land outside the extraction root, and the rejection must
+        # happen before any member is written inside it either.
+        assert not (outside / "pwned.txt").exists(), "payload escaped the extract root"
+        assert not (dest / "link").exists(), "member written despite rejection"
+
+        # A benign zip must still extract normally (no over-blocking).
+        good = Path(tmpdir) / "good.zip"
+        with _zip.ZipFile(good, "w") as zf:
+            zf.writestr("build/bin/llama-server", "#!/bin/sh\n")
+        dest2 = Path(tmpdir) / "dest2"
+        dest2.mkdir()
+        install._extract(good, dest2)
+        assert (dest2 / "build" / "bin" / "llama-server").is_file()
+
+        # Path traversal (../) must still be blocked — the original guard.
+        trav = Path(tmpdir) / "trav.zip"
+        with _zip.ZipFile(trav, "w") as zf:
+            zf.writestr("../escaped.txt", "nope")
+        dest3 = Path(tmpdir) / "dest3"
+        dest3.mkdir()
+        try:
+            install._extract(trav, dest3)
+        except RuntimeError as exc:
+            assert "traversal" in str(exc).lower(), exc
+        else:
+            raise AssertionError("zip traversal member was NOT rejected")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_registry_load_preserves_corrupt_file():
+    """A corrupt registry is set aside, not silently overwritten with {}."""
+    models = _load_models()
+    tmpdir = tempfile.mkdtemp(prefix="llama-reg-")
+    saved = os.environ.get("LLAMA_CPP_INSTALL_DIR")
+    try:
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = tmpdir
+        path = models._registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json at all", encoding="utf-8")
+
+        assert models._load_registry() == {}, "corrupt registry should read as empty"
+        corrupt = list(path.parent.glob("models.json.corrupt-*"))
+        assert corrupt, "corrupt registry was discarded instead of preserved"
+        assert "not json" in corrupt[0].read_text(encoding="utf-8")
+
+        # A non-dict payload is also rejected (list would break reg[alias]).
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        assert models._load_registry() == {}
+
+        # Missing file is normal, not corruption.
+        path.unlink(missing_ok=True)
+        before = len(list(path.parent.glob("models.json.corrupt-*")))
+        assert models._load_registry() == {}
+        assert len(list(path.parent.glob("models.json.corrupt-*"))) == before
+    finally:
+        if saved is None:
+            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+        else:
+            os.environ["LLAMA_CPP_INSTALL_DIR"] = saved
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_registry_txn_serializes_concurrent_writers():
+    """Interleaved read-modify-write must not lose entries.
+
+    Simulates the real race: two writers each open a transaction and add a
+    different alias. Without locking the second save clobbers the first.
+    """
+    models = _load_models()
+    tmpdir = tempfile.mkdtemp(prefix="llama-regtxn-")
+    saved = os.environ.get("LLAMA_CPP_INSTALL_DIR")
+    try:
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = tmpdir
+
+        # Sequential transactions accumulate.
+        for i in range(5):
+            with models._registry_txn() as reg:
+                reg[f"model-{i}"] = {"path": f"/x/{i}", "size_gb": 0.1}
+        assert len(models._load_registry()) == 5, models._load_registry()
+
+        # Threads hitting the same transaction must all survive.
+        import threading
+
+        errors = []
+
+        def add(n):
+            try:
+                with models._registry_txn() as reg:
+                    reg[f"threaded-{n}"] = {"path": f"/t/{n}", "size_gb": 0.2}
+            except Exception as exc:  # noqa: BLE001 — surfaced via errors list
+                errors.append(exc)
+
+        threads = [threading.Thread(target=add, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+        final = models._load_registry()
+        assert len(final) == 9, f"expected 9 entries, got {len(final)}: {sorted(final)}"
+
+        # Unique temp names: no stale fixed-name tmp left behind.
+        assert not list(Path(tmpdir).glob("models.json.tmp")), "fixed tmp name still used"
+    finally:
+        if saved is None:
+            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+        else:
+            os.environ["LLAMA_CPP_INSTALL_DIR"] = saved
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

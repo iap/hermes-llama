@@ -17,6 +17,8 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import install
@@ -105,21 +107,66 @@ def _server_pid_path() -> Path:
 
 
 def _load_registry() -> dict:
+    """Read the model registry.
+
+    A missing file is normal (nothing pulled yet) and yields ``{}``. A file that
+    exists but does not parse is NOT treated as empty: it is preserved beside the
+    original as ``models.json.corrupt-<pid>`` before returning ``{}``, so a
+    subsequent save cannot silently destroy recoverable entries.
+    """
     path = _registry_path()
     if not path.is_file():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — corrupt/unreadable registry
+        try:
+            path.replace(path.with_suffix(f".json.corrupt-{os.getpid()}"))
+        except Exception:  # noqa: BLE001 — best-effort preservation
+            pass
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _save_registry(reg: dict) -> None:
+    """Atomically write the registry via a PID-unique temp file.
+
+    A fixed temp name races when two processes save concurrently (both write the
+    same ``.tmp`` then both ``os.replace``); the unique suffix removes that.
+    Callers mutating the registry should hold ``_registry_txn()``.
+    """
     path = _registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(reg, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_suffix(f".json.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    try:
+        tmp.write_text(json.dumps(reg, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+@contextmanager
+def _registry_txn():
+    """Serialize a registry read-modify-write across processes.
+
+    Yields the current registry dict; on clean exit it is written back inside the
+    same lock, so concurrent ``pull`` calls cannot lose each other's entries.
+    Falls back to an unlocked transaction when the lock cannot be taken, since
+    losing a registry entry is preferable to refusing to record a finished
+    multi-GiB download.
+    """
+    try:
+        with install.registry_lock():
+            reg = _load_registry()
+            yield reg
+            _save_registry(reg)
+            return
+    except RuntimeError:
+        pass
+    reg = _load_registry()
+    yield reg
+    _save_registry(reg)
 
 
 def list_models() -> str:
@@ -412,14 +459,30 @@ def pull(spec: str, alias: str | None = None) -> str:
         if sz < 1024 * 1024:  # <1 MiB is definitely truncated
             dest.unlink(missing_ok=True)
         else:
-            # Re-register an existing file (repairs a lost/corrupted registry entry).
-            reg = _load_registry()
-            reg[alias] = {
+            # A large file is not automatically a good file: verify it against
+            # upstream before re-registering, so a corrupted or tampered payload
+            # is not accepted just because it survived a previous run. Entries
+            # pulled before checksums existed get their digest backfilled here.
+            expected = _expected_sha256(repo, remote_file)
+            if expected:
+                try:
+                    _verify_sha256(dest, expected)
+                except Exception as exc:
+                    dest.unlink(missing_ok=True)
+                    return (
+                        f"Existing file failed verification and was removed: {exc} "
+                        f"Run `/llama pull {spec}` again to re-download."
+                    )
+            entry = {
                 "repo": repo, "file": local_name, "path": str(dest),
                 "size_gb": round(sz / 1024**3, 2),
             }
-            _save_registry(reg)
-            return f"Already present: {dest} (registered as '{alias}')."
+            if expected:
+                entry["sha256"] = expected
+            with _registry_txn() as reg:
+                reg[alias] = entry
+            state = "verified" if expected else "checksum unavailable upstream"
+            return f"Already present: {dest} ({state}, registered as '{alias}')."
     url = _hf_file_url(repo, remote_file)
     # Ask upstream for the expected digest before transferring. None means
     # "cannot verify" (offline / non-LFS / mirror without the field) and the
@@ -430,12 +493,11 @@ def pull(spec: str, alias: str | None = None) -> str:
     except Exception as exc:
         return f"Download failed: {exc}"
     size_gb = round(dest.stat().st_size / 1024**3, 2)
-    reg = _load_registry()
     entry = {"repo": repo, "file": local_name, "path": str(dest), "size_gb": size_gb}
     if expected:
         entry["sha256"] = expected
-    reg[alias] = entry
-    _save_registry(reg)
+    with _registry_txn() as reg:
+        reg[alias] = entry
     verified = " (sha256 verified)" if expected else " (checksum unavailable upstream)"
     return f"Downloaded {repo}/{remote_file} ({size_gb} GB){verified} → registered as '{alias}'."
 
