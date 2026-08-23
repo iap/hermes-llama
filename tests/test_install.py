@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -448,7 +449,10 @@ def test_check_reports_stale_source_build():
 
     saved_urlopen, saved_meta = _ur.urlopen, install._read_meta
     saved_latest = install._latest_tag, install._smoke_test, install.find_binary
+    saved_dir = os.environ.get("LLAMA_CPP_INSTALL_DIR")
     try:
+        tmp = tempfile.mkdtemp(prefix="llama-src-fresh-")
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = tmp
         install._read_meta = lambda: dict(meta)
         install._latest_tag = lambda: None
         install._smoke_test = lambda binary, timeout=30.0: (True, "llama-server version 1")
@@ -476,6 +480,11 @@ def test_check_reports_stale_source_build():
         _ur.urlopen = saved_urlopen
         install._read_meta = saved_meta
         install._latest_tag, install._smoke_test, install.find_binary = saved_latest
+        if saved_dir is None:
+            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+        else:
+            os.environ["LLAMA_CPP_INSTALL_DIR"] = saved_dir
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_wire_config_derives_base_url():
