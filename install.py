@@ -119,6 +119,76 @@ def _unique_names() -> tuple[Path, Path]:
     return install_root() / f"{BIN_DIR_NAME}.tmp{suf}", install_root() / f"{BIN_DIR_NAME}.bak{suf}"
 
 
+def _commit_staged_bin(staging: Path, backup: Path, meta: dict) -> dict:
+    """Atomically replace ``bin_dir()`` with ``staging``. Call with ``_install_lock`` held.
+
+    ``staging`` must already contain a smoke-tested binary. Handles the
+    live-server interlock, backup, swap, verification, metadata, and cleanup.
+    Never raises — returns an ``{ok, method, detail}`` dict.
+    """
+    method = str(meta.get("method") or "prebuilt")
+    shutil.rmtree(backup, ignore_errors=True)
+    if not _stop_loaded_server():
+        shutil.rmtree(staging, ignore_errors=True)
+        return {
+            "ok": False,
+            "method": method,
+            "detail": "a running llama-server could not be stopped; stop it manually and retry",
+        }
+    swapped = False
+    if bin_dir().exists():
+        try:
+            bin_dir().rename(backup)
+            swapped = True
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            return {"ok": False, "method": method, "detail": "failed to backup existing bin"}
+    try:
+        staging.rename(bin_dir())
+    except Exception as exc:
+        if swapped and backup.exists():
+            try:
+                if bin_dir().exists():
+                    shutil.rmtree(bin_dir(), ignore_errors=True)
+                backup.rename(bin_dir())
+            except Exception:  # noqa: BLE001
+                pass
+        shutil.rmtree(staging, ignore_errors=True)
+        return {"ok": False, "method": method, "detail": f"swap failed: {exc}"}
+    moved = find_binary()
+    if moved is None:
+        shutil.rmtree(bin_dir(), ignore_errors=True)
+        if backup.exists():
+            try:
+                backup.rename(bin_dir())
+            except Exception:  # noqa: BLE001
+                pass
+        shutil.rmtree(staging, ignore_errors=True)
+        detail = (
+            "build finished but llama-server was not produced"
+            if method == "source"
+            else "installed but binary not found after swap"
+        )
+        return {"ok": False, "method": method, "detail": detail}
+    try:
+        _write_meta(meta)
+    except Exception as exc:
+        shutil.rmtree(bin_dir(), ignore_errors=True)
+        if backup.exists():
+            try:
+                backup.rename(bin_dir())
+            except Exception:  # noqa: BLE001
+                pass
+        shutil.rmtree(staging, ignore_errors=True)
+        return {"ok": False, "method": method, "detail": f"metadata write failed: {exc}"}
+    shutil.rmtree(backup, ignore_errors=True)
+    shutil.rmtree(staging, ignore_errors=True)
+    if method == "source":
+        return {"ok": True, "method": method, "detail": f"Built llama.cpp from source → {moved}"}
+    tag = str(meta.get("tag") or "")
+    return {"ok": True, "method": method, "detail": f"Installed {tag} prebuilt → {moved}"}
+
+
 def _arch() -> str:
     machine = platform.machine().lower()
     if machine in ("x86_64", "amd64"):
@@ -669,62 +739,11 @@ def _build_from_source(backend: str) -> dict:
             if not ok2:
                 shutil.rmtree(staging, ignore_errors=True)
                 return {"ok": False, "method": "source", "detail": f"built binary does not run: {info2}"}
-            shutil.rmtree(backup, ignore_errors=True)
-            if not _stop_loaded_server():
-                shutil.rmtree(staging, ignore_errors=True)
-                return {
-                    "ok": False,
-                    "method": "source",
-                    "detail": "a running llama-server could not be stopped; stop it manually and retry",
-                }
-            swapped = False
-            if bin_dir().exists():
-                try:
-                    bin_dir().rename(backup)
-                    swapped = True
-                except Exception:
-                    shutil.rmtree(staging, ignore_errors=True)
-                    return {"ok": False, "method": "source", "detail": "failed to backup existing bin"}
-            try:
-                staging.rename(bin_dir())
-            except Exception as exc:
-                if swapped and backup.exists():
-                    try:
-                        # restore
-                        if bin_dir().exists():
-                            shutil.rmtree(bin_dir(), ignore_errors=True)
-                        backup.rename(bin_dir())
-                    except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
-                        pass
-                shutil.rmtree(staging, ignore_errors=True)
-                return {"ok": False, "method": "source", "detail": f"swap failed: {exc}"}
-            # metadata must succeed or restore
-            moved = find_binary()
-            if moved is None:
-                # swap succeeded but binary not found -> restore
-                shutil.rmtree(bin_dir(), ignore_errors=True)
-                if backup.exists():
-                    try:
-                        backup.rename(bin_dir())
-                    except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
-                        pass
-                shutil.rmtree(staging, ignore_errors=True)
-                return {"ok": False, "method": "source", "detail": "build finished but llama-server was not produced"}
-            try:
-                _write_meta({"tag": "source", "method": "source", "backend": backend, "commit": src_commit})
-            except Exception as exc:
-                # restore prior install
-                shutil.rmtree(bin_dir(), ignore_errors=True)
-                if backup.exists():
-                    try:
-                        backup.rename(bin_dir())
-                    except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
-                        pass
-                shutil.rmtree(staging, ignore_errors=True)
-                return {"ok": False, "method": "source", "detail": f"metadata write failed: {exc}"}
-            shutil.rmtree(backup, ignore_errors=True)
-            shutil.rmtree(staging, ignore_errors=True)
-            return {"ok": True, "method": "source", "detail": f"Built llama.cpp from source → {moved}"}
+            return _commit_staged_bin(
+                staging,
+                backup,
+                {"tag": "source", "method": "source", "backend": backend, "commit": src_commit},
+            )
         finally:
             # best-effort cleanup of this transaction's temp dirs
             try:
@@ -809,58 +828,9 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                                     "If this is macOS < 13.3, the prebuilt requires a newer OS."
                                 ),
                             }
-                        shutil.rmtree(backup, ignore_errors=True)
-                        if not _stop_loaded_server():
-                            shutil.rmtree(staging, ignore_errors=True)
-                            return {
-                                "ok": False,
-                                "method": "prebuilt",
-                                "detail": "a running llama-server could not be stopped; stop it manually and retry",
-                            }
-                        swapped = False
-                        if bin_dir().exists():
-                            try:
-                                bin_dir().rename(backup)
-                                swapped = True
-                            except Exception:
-                                shutil.rmtree(staging, ignore_errors=True)
-                                return {"ok": False, "method": "prebuilt", "detail": "failed to backup existing bin"}
-                        try:
-                            staging.rename(bin_dir())
-                        except Exception as exc:
-                            if swapped and backup.exists():
-                                try:
-                                    if bin_dir().exists():
-                                        shutil.rmtree(bin_dir(), ignore_errors=True)
-                                    backup.rename(bin_dir())
-                                except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
-                                    pass
-                            shutil.rmtree(staging, ignore_errors=True)
-                            return {"ok": False, "method": "prebuilt", "detail": f"swap failed: {exc}"}
-                        final = find_binary()
-                        if final is None:
-                            shutil.rmtree(bin_dir(), ignore_errors=True)
-                            if backup.exists():
-                                try:
-                                    backup.rename(bin_dir())
-                                except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
-                                    pass
-                            shutil.rmtree(staging, ignore_errors=True)
-                            return {"ok": False, "method": "prebuilt", "detail": "installed but binary not found after swap"}
-                        try:
-                            _write_meta({"tag": tag, "method": "prebuilt", "backend": backend})
-                        except Exception as exc:
-                            shutil.rmtree(bin_dir(), ignore_errors=True)
-                            if backup.exists():
-                                try:
-                                    backup.rename(bin_dir())
-                                except Exception:  # noqa: BLE001 — restore already failed, best-effort cleanup
-                                    pass
-                            shutil.rmtree(staging, ignore_errors=True)
-                            return {"ok": False, "method": "prebuilt", "detail": f"metadata write failed: {exc}"}
-                        shutil.rmtree(backup, ignore_errors=True)
-                        shutil.rmtree(staging, ignore_errors=True)
-                        return {"ok": True, "method": "prebuilt", "detail": f"Installed {tag} prebuilt → {final}"}
+                        return _commit_staged_bin(
+                            staging, backup, {"tag": tag, "method": "prebuilt", "backend": backend}
+                        )
                     finally:
                         try:
                             if staging.exists():
