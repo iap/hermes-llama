@@ -59,3 +59,7 @@ config_schema:
     type: str
     default: ""
     description: "Directory where GGUF models are stored. Empty = auto ($HERMES_HOME/llama-cpp/models)."
+  github_base:
+    type: str
+    default: ""
+    description: "GitHub download/clone base (for GitHub Enterprise). Empty = https://github.com."

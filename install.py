@@ -36,7 +36,16 @@ REPO = "ggml-org/llama.cpp"
 # Endpoints — env-overridable for GitHub Enterprise / HF mirror deployments.
 GITHUB_BASE = os.environ.get("LLAMA_CPP_GITHUB_BASE", "https://github.com").rstrip("/")
 GITHUB_API_BASE = os.environ.get("LLAMA_CPP_GITHUB_API_BASE", "https://api.github.com").rstrip("/")
-GITHUB_API = f"{GITHUB_API_BASE}/repos/{REPO}"
+
+
+def _github_api() -> str:
+    """GitHub API base for this repo (derived fresh so env overrides after import apply)."""
+    return f"{GITHUB_API_BASE}/repos/{REPO}"
+
+
+# Back-compat alias used by older call sites; prefer _github_api().
+GITHUB_API = _github_api()
+
 SERVER_BIN = "llama-server.exe" if sys.platform == "win32" else "llama-server"
 BACKENDS = ("cpu", "cuda", "vulkan", "source")
 
@@ -421,7 +430,7 @@ def _source_remote_head() -> str | None:
                     return sha
     except Exception:
         pass
-    url = f"{GITHUB_API}/repos/{REPO}/commits/master"
+    url = f"{_github_api()}/repos/{REPO}/commits/master"
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -536,7 +545,7 @@ def _latest_tag() -> str | None:
     # so a burst of nightly prereleases cannot push the first stable
     # bNNNN off the first page (previously per_page=30, single page).
     releases_all: list[dict] = []
-    url = GITHUB_API + "/releases?per_page=100"
+    url = _github_api() + "/releases?per_page=100"
     for _ in range(3):
         try:
             with urllib.request.urlopen(url, timeout=20) as resp:

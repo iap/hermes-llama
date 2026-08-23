@@ -114,6 +114,7 @@ _CONFIG_ENV = {
     "install_dir": "LLAMA_CPP_INSTALL_DIR",
     "models_dir": "LLAMA_CPP_MODELS_DIR",
     "api_key": "LLAMA_CPP_API_KEY",
+    "github_base": "LLAMA_CPP_GITHUB_BASE",
 }
 
 
