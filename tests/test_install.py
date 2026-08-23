@@ -438,7 +438,13 @@ def test_check_reports_stale_source_build():
 
         headers = {}
 
+    seen_urls = []
+
     import urllib.request as _ur
+
+    def _capture(req, timeout=20):
+        seen_urls.append(req.full_url if hasattr(req, "full_url") else str(req))
+        return _Resp()
 
     saved_urlopen, saved_meta = _ur.urlopen, install._read_meta
     saved_latest = install._latest_tag, install._smoke_test, install.find_binary
@@ -447,7 +453,7 @@ def test_check_reports_stale_source_build():
         install._latest_tag = lambda: None
         install._smoke_test = lambda binary, timeout=30.0: (True, "llama-server version 1")
         install.find_binary = lambda: "/fake/bin/llama-server"
-        _ur.urlopen = lambda req, timeout=20: _Resp()
+        _ur.urlopen = _capture
         # fetch_latest=True: the freshness probe is network-backed, mirroring
         # what install()'s skip check uses. fetch_latest=False is the offline
         # mode and must stay probe-free (reports unknown).
@@ -459,6 +465,13 @@ def test_check_reports_stale_source_build():
         meta["commit"] = "b" * 40
         r = install.check()
         assert r["up_to_date"] is True, r
+
+        # Regression: the commits URL must contain /repos/{REPO} exactly once.
+        # A doubled path (…/repos/X/Y/repos/X/Y/…) 404s and silently degrades
+        # freshness to unknown.
+        for u in seen_urls:
+            assert "/repos/" in u, u
+            assert u.count("/repos/") == 1, f"doubled repos path: {u}"
     finally:
         _ur.urlopen = saved_urlopen
         install._read_meta = saved_meta
