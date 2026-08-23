@@ -937,11 +937,9 @@ def _stop_loaded_server(models_module=None) -> bool:
     """Stop a loaded llama-server and report whether removal is now safe.
 
     Used by uninstall and the atomic-swap paths so we never remove ``bin/`` out
-    from under a live server. Returns True when no server is loaded, or when a
-    loaded server was stopped and ``_find_loaded_server()`` confirms it is
-    gone. Returns False only when a loaded server could NOT be confirmed
-    stopped — callers must then abort the removal/swap rather than delete
-    ``bin/`` under a live process.
+    from under a live server. Delegates to ``models.stop_loaded_server()``,
+    which owns the find -> stop -> re-confirm sequence; this wrapper only
+    resolves the sibling module and decides what an unavailable sibling means.
 
     ``models_module`` is an injection seam for tests; production callers omit
     it. The lazy ``from . import models`` fails when this file is loaded
@@ -957,14 +955,7 @@ def _stop_loaded_server(models_module=None) -> bool:
             return True
         models_module = _models
     try:
-        pid = models_module._find_loaded_server()
-        if pid is None:
-            return True
-        models_module.stop()
-        # Confirm against the PROCESS, not the PID file: stop() unlinks the pid
-        # file even when the kill did not take effect, so _find_loaded_server()
-        # would report "gone" for a server that is still running.
-        return not (models_module._pid_alive(pid) and models_module._is_llama_server(pid))
+        return bool(models_module.stop_loaded_server())
     except Exception:  # noqa: BLE001 — shutdown could not be confirmed
         return False
 

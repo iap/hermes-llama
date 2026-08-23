@@ -340,67 +340,100 @@ def test_uninstall_removes_artifacts_on_py311():
                 os.environ["LLAMA_CPP_INSTALL_DIR"] = saved
 
 
-def test_stop_loaded_server_confirms_shutdown():
-    """_stop_loaded_server() only reports True when the PROCESS is gone.
+def test_models_stop_loaded_server_confirms_shutdown():
+    """models.stop_loaded_server() only reports True when the PROCESS is gone.
 
     Regression for the ignored stop() failure: a failed stop must yield False so
     callers abort instead of deleting bin/ under a live server. Confirmation must
     not use _find_loaded_server(), because stop() unlinks the pid file even when
-    the kill failed. The ImportError path (standalone module load) counts as
-    nothing-loaded so uninstall stays usable as the recovery tool.
+    the kill failed.
     """
-    saved = install._stop_loaded_server
+    models = _load_models()
+    saved = (models._find_loaded_server, models.stop, models._pid_alive,
+             models._is_llama_server)
+    calls = {"stop": 0}
 
-    class _StubModels:
-        def __init__(self, pid, *, alive_after, is_server_after=True, stop_raises=False):
-            self._pid = pid
-            self._alive_after = alive_after
-            self._is_server_after = is_server_after
-            self._stop_raises = stop_raises
-            self.stop_calls = 0
+    def _wire(pid, *, alive_after, is_server_after=True, stop_raises=False):
+        calls["stop"] = 0
 
-        def _find_loaded_server(self):
-            return self._pid
-
-        def stop(self):
-            self.stop_calls += 1
-            if self._stop_raises:
+        def _stop():
+            calls["stop"] += 1
+            if stop_raises:
                 raise RuntimeError("kill failed")
             return "Stopped."
 
+        models._find_loaded_server = lambda: pid
+        models.stop = _stop
         # Process-level probes: unaffected by stop() unlinking the pid file.
-        def _pid_alive(self, pid):
-            assert pid == self._pid
-            return self._alive_after
-
-        def _is_llama_server(self, pid):
-            return self._is_server_after
+        models._pid_alive = lambda p: alive_after
+        models._is_llama_server = lambda p: is_server_after
 
     try:
         # No loaded server -> True without calling stop().
-        stub = _StubModels(None, alive_after=False)
-        assert install._stop_loaded_server(models_module=stub) is True
-        assert stub.stop_calls == 0
+        _wire(None, alive_after=False)
+        assert models.stop_loaded_server() is True
+        assert calls["stop"] == 0
 
         # Loaded -> stopped -> process gone: True.
-        stub = _StubModels(1234, alive_after=False)
-        assert install._stop_loaded_server(models_module=stub) is True
-        assert stub.stop_calls == 1
+        _wire(1234, alive_after=False)
+        assert models.stop_loaded_server() is True
+        assert calls["stop"] == 1
 
         # Loaded -> stop() ran but process STILL ALIVE: False (must abort).
         # This is the case a _find_loaded_server()-based check would miss.
-        stub = _StubModels(1234, alive_after=True)
-        assert install._stop_loaded_server(models_module=stub) is False
+        _wire(1234, alive_after=True)
+        assert models.stop_loaded_server() is False
 
         # Still alive but PID reused by another program -> not our server: True.
-        stub = _StubModels(1234, alive_after=True, is_server_after=False)
-        assert install._stop_loaded_server(models_module=stub) is True
+        _wire(1234, alive_after=True, is_server_after=False)
+        assert models.stop_loaded_server() is True
 
         # Loaded -> stop raises: False.
-        stub = _StubModels(1234, alive_after=True, stop_raises=True)
-        assert install._stop_loaded_server(models_module=stub) is False
+        _wire(1234, alive_after=True, stop_raises=True)
+        assert models.stop_loaded_server() is False
     finally:
-        install._stop_loaded_server = saved
+        (models._find_loaded_server, models.stop, models._pid_alive,
+         models._is_llama_server) = saved
+
+
+def test_install_stop_loaded_server_delegates():
+    """install._stop_loaded_server() delegates and never touches private members.
+
+    It must forward to the sibling's public stop_loaded_server(), propagate the
+    verdict, treat a raising sibling as unsafe, and treat an unavailable sibling
+    (standalone load / corrupt install) as nothing-loaded so uninstall stays
+    usable as the recovery path.
+    """
+    class _Stub:
+        def __init__(self, verdict=None, raises=False):
+            self.verdict = verdict
+            self.raises = raises
+            self.calls = 0
+
+        def stop_loaded_server(self):
+            self.calls += 1
+            if self.raises:
+                raise RuntimeError("boom")
+            return self.verdict
+
+        def __getattr__(self, name):  # any private reach-in would explode here
+            raise AssertionError(f"install must not touch models.{name}")
+
+    stub = _Stub(verdict=True)
+    assert install._stop_loaded_server(models_module=stub) is True
+    assert stub.calls == 1
+
+    stub = _Stub(verdict=False)
+    assert install._stop_loaded_server(models_module=stub) is False
+
+    # Truthiness is normalised to a real bool.
+    assert install._stop_loaded_server(models_module=_Stub(verdict=1)) is True
+
+    # A raising sibling means shutdown was not confirmed -> unsafe.
+    assert install._stop_loaded_server(models_module=_Stub(raises=True)) is False
+
+    # No sibling importable (standalone load): nothing loaded -> safe.
+    assert install._stop_loaded_server() is True
 
 
 def test_uninstall_aborts_when_stop_fails():
@@ -613,6 +646,90 @@ def test_settings_cpu_tuning_defaults_and_overrides():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def test_register_wires_bundled_skill():
+    """register() registers the bundled SKILL.md, and survives older cores.
+
+    The skill file shipped in the repo for a while with zero references — this
+    guards against it going orphaned again. Registration must also degrade
+    quietly on a Hermes build whose PluginContext has no register_skill.
+    """
+    import types
+
+    pkg_name = "hermes_llama_reg"
+    pkg = types.ModuleType(pkg_name)
+    pkg.__path__ = [str(_REPO_ROOT)]
+    sys.modules[pkg_name] = pkg
+    sys.modules[f"{pkg_name}.install"] = install
+    sys.modules[f"{pkg_name}.models"] = _load_models()
+    # provider.py imports the Hermes-only `providers` package; stub it so the
+    # package __init__ imports cleanly outside a Hermes runtime.
+    providers_stub = types.ModuleType("providers")
+    providers_stub.register_provider = lambda profile: None
+    base_stub = types.ModuleType("providers.base")
+
+    class _Profile:
+        def __init__(self, **kw):
+            for k, v in kw.items():
+                setattr(self, k, v)
+            self.default_headers = {}
+
+    base_stub.ProviderProfile = _Profile
+    saved_mods = {k: sys.modules.get(k) for k in ("providers", "providers.base")}
+    sys.modules["providers"] = providers_stub
+    sys.modules["providers.base"] = base_stub
+    try:
+        spec = importlib.util.spec_from_file_location(
+            f"{pkg_name}.__init__", _REPO_ROOT / "__init__.py",
+            submodule_search_locations=[str(_REPO_ROOT)],
+        )
+        mod = importlib.util.module_from_spec(spec)
+        mod.__package__ = pkg_name
+        sys.modules[f"{pkg_name}.entry"] = mod
+        spec.loader.exec_module(mod)
+
+        class _Ctx:
+            def __init__(self, with_skill=True):
+                self.skills = []
+                self.commands = []
+                self._with_skill = with_skill
+
+            def get_config(self, key):
+                return None
+
+            def register_command(self, name, **kw):
+                self.commands.append(name)
+
+            def register_cli_command(self, name, **kw):
+                self.commands.append(f"cli:{name}")
+
+            def register_skill(self, name, path=None, description=""):
+                if not self._with_skill:
+                    raise AttributeError("register_skill")
+                self.skills.append((name, Path(path), description))
+
+        ctx = _Ctx()
+        mod.register(ctx)
+        assert len(ctx.skills) == 1, ctx.skills
+        name, path, desc = ctx.skills[0]
+        # Namespace comes from plugin.yaml's `name`, so the resolvable id is
+        # hermes-llama:llama-cpp-local-models.
+        assert name == "llama-cpp-local-models", name
+        assert path.is_file() and path.name == "SKILL.md", path
+        assert desc.strip(), "skill registered without a description"
+
+        # A core without register_skill must not break plugin load.
+        ctx2 = _Ctx(with_skill=False)
+        mod.register(ctx2)
+        assert ctx2.skills == []
+        assert "llama" in ctx2.commands
+    finally:
+        for k, v in saved_mods.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
 
 
 def main() -> int:

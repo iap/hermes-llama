@@ -612,6 +612,32 @@ def stop() -> str:
     return f"Stopped llama-server (pid {pid})."
 
 
+def stop_loaded_server() -> bool:
+    """Stop any managed llama-server and report whether removal is now safe.
+
+    This is the public server-control entry point for ``install.py`` — it owns
+    the whole find -> stop -> re-confirm sequence so callers never need this
+    module's private helpers.
+
+    Returns True when no server was loaded, or when a loaded server was stopped
+    and the PROCESS is confirmed gone. Returns False when a loaded server could
+    not be confirmed stopped, so the caller must abort rather than delete
+    ``bin/`` from under a live process.
+
+    Confirmation deliberately probes the process rather than the pid file:
+    ``stop()`` unlinks the pid file even when the kill did not take effect, so
+    ``_find_loaded_server()`` alone would report a still-running server as gone.
+    """
+    try:
+        pid = _find_loaded_server()
+        if pid is None:
+            return True
+        stop()
+        return not (_pid_alive(pid) and _is_llama_server(pid))
+    except Exception:  # noqa: BLE001 — shutdown could not be confirmed
+        return False
+
+
 def status() -> str:
     s = _settings()
     base = f"http://{s['host']}:{s['port']}"
