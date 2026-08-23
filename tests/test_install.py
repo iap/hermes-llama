@@ -732,6 +732,168 @@ def test_register_wires_bundled_skill():
                 sys.modules[k] = v
 
 
+def test_sha256_helpers_and_verification():
+    """_file_sha256 / _verify_sha256 accept a match and REJECT a mismatch.
+
+    A verifier that never rejects is worse than none, so the negative case is
+    the load-bearing assertion here.
+    """
+    import hashlib as _hl
+
+    models = _load_models()
+    tmpdir = tempfile.mkdtemp(prefix="llama-sha-")
+    try:
+        f = Path(tmpdir) / "blob.bin"
+        payload = b"hermes-llama sha256 probe\n" * 4096
+        f.write_bytes(payload)
+        want = _hl.sha256(payload).hexdigest()
+
+        # Streaming hash must equal the one-shot hash (chunk boundaries handled).
+        assert models._file_sha256(f) == want, "streaming digest disagrees with hashlib"
+
+        # Match -> silent pass.
+        models._verify_sha256(f, want)
+
+        # None/empty -> no-op (cannot verify is not a failure).
+        models._verify_sha256(f, None)
+        models._verify_sha256(f, "")
+
+        # Mismatch -> must raise, and the message must not leak a full digest.
+        try:
+            models._verify_sha256(f, "0" * 64)
+        except RuntimeError as exc:
+            assert "checksum mismatch" in str(exc), exc
+        else:
+            raise AssertionError("mismatched checksum did NOT raise")
+
+        # A single flipped byte must be caught.
+        corrupted = bytearray(payload)
+        corrupted[len(corrupted) // 2] ^= 0xFF
+        f.write_bytes(bytes(corrupted))
+        try:
+            models._verify_sha256(f, want)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("single-bit corruption was NOT detected")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_expected_sha256_parses_tree_api():
+    """_expected_sha256 extracts lfs.oid, and returns None on every unusable shape."""
+    models = _load_models()
+    import urllib.request as _ur
+
+    class _Resp:
+        status = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            import json as _json
+
+            return _json.dumps(self._payload).encode()
+
+    saved = _ur.urlopen
+    try:
+        good = "a" * 64
+        # Happy path: matching entry with an lfs.oid.
+        _ur.urlopen = lambda req, timeout=30: _Resp(
+            [{"path": "other.gguf", "lfs": {"oid": "b" * 64}},
+             {"path": "m.gguf", "lfs": {"oid": good}}]
+        )
+        assert models._expected_sha256("Org/Repo", "m.gguf") == good
+
+        # "sha256:<hex>" prefixed form (some mirrors).
+        _ur.urlopen = lambda req, timeout=30: _Resp(
+            [{"path": "m.gguf", "lfs": {"oid": f"sha256:{good}"}}]
+        )
+        assert models._expected_sha256("Org/Repo", "m.gguf") == good
+
+        # lfs: null (the model-detail shape that made this "impossible" before).
+        _ur.urlopen = lambda req, timeout=30: _Resp([{"path": "m.gguf", "lfs": None}])
+        assert models._expected_sha256("Org/Repo", "m.gguf") is None
+
+        # File absent from the tree.
+        _ur.urlopen = lambda req, timeout=30: _Resp([{"path": "z.gguf", "lfs": {"oid": good}}])
+        assert models._expected_sha256("Org/Repo", "m.gguf") is None
+
+        # Garbage digest (not 64 hex chars) must be rejected, not returned.
+        _ur.urlopen = lambda req, timeout=30: _Resp([{"path": "m.gguf", "lfs": {"oid": "nope"}}])
+        assert models._expected_sha256("Org/Repo", "m.gguf") is None
+
+        # Non-list payload.
+        _ur.urlopen = lambda req, timeout=30: _Resp({"error": "nope"})
+        assert models._expected_sha256("Org/Repo", "m.gguf") is None
+
+        # Network failure -> None (never raises into the caller).
+        def _boom(req, timeout=30):
+            raise OSError("offline")
+
+        _ur.urlopen = _boom
+        assert models._expected_sha256("Org/Repo", "m.gguf") is None
+    finally:
+        _ur.urlopen = saved
+
+
+def test_download_model_rejects_bad_checksum():
+    """_download_model must NOT promote a .part whose digest is wrong.
+
+    Exercises the urllib branch end to end: dest must not exist afterwards and
+    the staging file must be cleaned up.
+    """
+    models = _load_models()
+    import urllib.request as _ur
+
+    payload = b"pretend gguf bytes " * 1000
+
+    class _Resp:
+        status = 200
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n=-1):
+            nonlocal payload
+            data, payload = payload, b""
+            return data
+
+    tmpdir = tempfile.mkdtemp(prefix="llama-dl-")
+    saved_urlopen, saved_which = _ur.urlopen, models.shutil.which
+    try:
+        # Force the urllib branch (no curl) so the test is deterministic.
+        models.shutil.which = lambda name: None
+        _ur.urlopen = lambda req, timeout=3600: _Resp()
+        dest = Path(tmpdir) / "model.gguf"
+
+        try:
+            models._download_model("https://example.invalid/m.gguf", dest,
+                                   expected_sha256="f" * 64)
+        except RuntimeError as exc:
+            assert "checksum mismatch" in str(exc), exc
+        else:
+            raise AssertionError("bad checksum did NOT abort the download")
+
+        assert not dest.exists(), "corrupt payload was promoted to dest"
+        assert not dest.with_suffix(dest.suffix + ".part").exists(), ".part left behind"
+    finally:
+        _ur.urlopen = saved_urlopen
+        models.shutil.which = saved_which
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

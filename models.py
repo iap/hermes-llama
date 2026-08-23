@@ -8,6 +8,7 @@ stable model id under the "Llama CPP" provider.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -252,13 +253,76 @@ def _pick_gguf_file(repo: str) -> str | None:
         return None
 
 
-def _download_model(url: str, dest: Path) -> None:
+def _expected_sha256(repo: str, remote_file: str) -> str | None:
+    """Return the upstream sha256 for a repo file, or None when unavailable.
+
+    Hugging Face stores GGUF weights in LFS, and the *tree* endpoint exposes the
+    object digest as ``lfs.oid`` (the model-detail endpoint does not — it reports
+    ``lfs: null``, which is why integrity checking was previously deferred).
+
+    Returns None whenever the digest cannot be established (offline, private repo,
+    non-LFS file, unexpected payload). Callers must treat None as "cannot verify"
+    and proceed, so a metadata outage never blocks a download.
+    """
+    try:
+        url = f"{_hf_base()}/api/models/{repo}/tree/main"
+        req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return None
+            entries = json.loads(resp.read().decode())
+    except Exception:  # noqa: BLE001 — verification is best-effort by design
+        return None
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("path") != remote_file:
+            continue
+        lfs = entry.get("lfs")
+        if isinstance(lfs, dict):
+            oid = lfs.get("oid")
+            # HF returns a bare hex digest; some mirrors use the "sha256:<hex>" form.
+            if isinstance(oid, str):
+                oid = oid.split(":")[-1].strip().lower()
+                if len(oid) == 64 and all(c in "0123456789abcdef" for c in oid):
+                    return oid
+        return None
+    return None
+
+
+def _file_sha256(path: Path) -> str:
+    """Streaming sha256 of a file (1 MiB chunks — never loads a GiB model in RAM)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_sha256(path: Path, expected: str | None) -> None:
+    """Raise when *path* does not match *expected*. No-op when expected is None."""
+    if not expected:
+        return
+    actual = _file_sha256(path)
+    if actual != expected:
+        raise RuntimeError(
+            f"checksum mismatch: expected sha256 {expected[:16]}…, got {actual[:16]}… "
+            "(download corrupted or upstream file changed mid-transfer)"
+        )
+
+
+def _download_model(url: str, dest: Path, *, expected_sha256: str | None = None) -> None:
     """Download a model file robustly.
 
     Prefers ``curl`` when available because Python's ``urllib`` can stall for
     minutes before the first byte arrives against Hugging Face's Xet CDN
     (``us.aws.cdn.hf.co``) redirects. ``curl`` starts the transfer immediately.
     Falls back to ``urllib`` when ``curl`` is absent. Raises on failure.
+
+    When *expected_sha256* is supplied, the staged ``.part`` file is hashed and
+    must match before it is promoted to *dest* — so a corrupted or substituted
+    payload never lands under its final name. A byte-count check still runs
+    first because it is far cheaper than hashing a multi-GiB file.
     """
     tmp = dest.with_suffix(dest.suffix + ".part")
     curl = shutil.which("curl")
@@ -293,6 +357,7 @@ def _download_model(url: str, dest: Path) -> None:
                 pass
             if expected is not None and tmp.stat().st_size != expected:
                 raise RuntimeError(f"download truncated: expected {expected} bytes, got {tmp.stat().st_size}")
+            _verify_sha256(tmp, expected_sha256)
             os.replace(tmp, dest)
             return
         req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
@@ -314,6 +379,7 @@ def _download_model(url: str, dest: Path) -> None:
             out.flush()
             if expected_len is not None and tmp.stat().st_size != expected_len:
                 raise RuntimeError(f"download truncated: Content-Length {expected_len}, got {tmp.stat().st_size}")
+        _verify_sha256(tmp, expected_sha256)
         os.replace(tmp, dest)
     except Exception:
         tmp.unlink(missing_ok=True)
@@ -355,15 +421,23 @@ def pull(spec: str, alias: str | None = None) -> str:
             _save_registry(reg)
             return f"Already present: {dest} (registered as '{alias}')."
     url = _hf_file_url(repo, remote_file)
+    # Ask upstream for the expected digest before transferring. None means
+    # "cannot verify" (offline / non-LFS / mirror without the field) and the
+    # download proceeds unverified rather than failing closed.
+    expected = _expected_sha256(repo, remote_file)
     try:
-        _download_model(url, dest)
+        _download_model(url, dest, expected_sha256=expected)
     except Exception as exc:
         return f"Download failed: {exc}"
     size_gb = round(dest.stat().st_size / 1024**3, 2)
     reg = _load_registry()
-    reg[alias] = {"repo": repo, "file": local_name, "path": str(dest), "size_gb": size_gb}
+    entry = {"repo": repo, "file": local_name, "path": str(dest), "size_gb": size_gb}
+    if expected:
+        entry["sha256"] = expected
+    reg[alias] = entry
     _save_registry(reg)
-    return f"Downloaded {repo}/{remote_file} ({size_gb} GB) → registered as '{alias}'."
+    verified = " (sha256 verified)" if expected else " (checksum unavailable upstream)"
+    return f"Downloaded {repo}/{remote_file} ({size_gb} GB){verified} → registered as '{alias}'."
 
 
 def _pid_alive(pid: int) -> bool:
