@@ -27,37 +27,65 @@ from . import install
 def _hf_base() -> str:
     return os.environ.get("LLAMA_CPP_HF_ENDPOINT", "https://huggingface.co").rstrip("/")
 
-# Liquid AI sample models (verified HF repos — see RESEARCH.md).
-# License: "LFM Open License v1.0" (non-commercial research; commercial use
-# limited to non-profits and entities < $10M annual revenue). Review before use.
+# Bundled sample models (verified HF repos — see RESEARCH.md).
+#
+# Two licence families ship here, deliberately:
+#   * LiquidAI LFM2 — "LFM Open License v1.0": non-commercial research; commercial
+#     use limited to non-profits and entities < $10M annual revenue.
+#   * Qwen2.5 / SmolLM2 — Apache-2.0: permissive, commercial use allowed, and
+#     tool-calling capable (pair with llama-server ``--jinja``).
+# Sizes are the real GGUF byte sizes from the HF tree API, not estimates.
 LIQUIDAI_PRESETS = {
     "liquidai": {
         "alias": "liquidai-lfm2-1.2b",
         "repo": "LiquidAI/LFM2-1.2B-GGUF",
         "file": "LFM2-1.2B-Q4_K_M.gguf",
         "size_gb": 0.68,
-        "note": "Default sample — best fit for 8 GB RAM, CPU-only.",
+        "note": "Default sample — best fit for 8 GB RAM, CPU-only. LFM licence.",
     },
     "liquidai-350m": {
         "alias": "liquidai-lfm2-350m",
         "repo": "LiquidAI/LFM2-350M-GGUF",
         "file": "LFM2-350M-Q4_K_M.gguf",
         "size_gb": 0.21,
-        "note": "Ultra-light edge model.",
+        "note": "Ultra-light edge model. LFM licence.",
     },
     "liquidai-2.6b": {
         "alias": "liquidai-lfm2-2.6b",
         "repo": "LiquidAI/LFM2-2.6B-GGUF",
         "file": "LFM2-2.6B-Q4_K_M.gguf",
         "size_gb": 1.46,
-        "note": "Stronger, slower on 2-core CPU.",
+        "note": "Stronger, slower on 2-core CPU. LFM licence.",
     },
     "liquidai-2.5": {
         "alias": "liquidai-lfm2.5-2.6b",
         "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
         "file": "LFM2.5-2.6B-Q4_K_M.gguf",
         "size_gb": 1.56,
-        "note": "Most-downloaded LiquidAI GGUF.",
+        "note": "Most-downloaded LiquidAI GGUF. LFM licence.",
+    },
+    "qwen2.5-1.5b": {
+        "alias": "qwen2.5-1.5b-instruct",
+        "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+        "file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "size_gb": 1.04,
+        "note": "Apache-2.0 general instruct. Tool-calling works via --jinja; at 1.5B "
+                "prefer tool_choice='required' — 'auto' often answers in prose instead.",
+    },
+    "qwen2.5-coder-1.5b": {
+        "alias": "qwen2.5-coder-1.5b-instruct",
+        "repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+        "file": "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+        "size_gb": 1.04,
+        "note": "Apache-2.0 code-focused instruct. Same tool-calling caveat as qwen2.5-1.5b.",
+    },
+    "smollm2-1.7b": {
+        "alias": "smollm2-1.7b-instruct",
+        "repo": "bartowski/SmolLM2-1.7B-Instruct-GGUF",
+        "file": "SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
+        "size_gb": 0.98,
+        "note": "Apache-2.0, smallest permissive option here. Chat-oriented — "
+                "not recommended for tool-calling.",
     },
 }
 
@@ -120,6 +148,51 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _str_env(name: str, default: str) -> str:
+    """Read a string env var, falling back to *default* when unset/blank."""
+    return (os.environ.get(name, "") or "").strip() or default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    """Parse a boolean env var ("1/true/yes/on" == True), else *default*."""
+    raw = (os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def _physical_cores() -> int:
+    """Best-effort physical (not logical) core count; 0 means "let llama.cpp decide".
+
+    Hyper-threaded siblings do not help llama.cpp's compute-bound matmuls, so
+    the physical count is the better default on CPU-only hosts.
+    """
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.physicalcpu"], capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+            return int(out) if out.isdigit() else 0
+        if sys.platform.startswith("linux"):
+            # Count distinct (physical id, core id) pairs from /proc/cpuinfo.
+            text = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+            pairs, phys, core = set(), None, None
+            for line in text.splitlines():
+                if line.startswith("physical id"):
+                    phys = line.split(":", 1)[1].strip()
+                elif line.startswith("core id"):
+                    core = line.split(":", 1)[1].strip()
+                elif not line.strip() and phys is not None and core is not None:
+                    pairs.add((phys, core))
+                    phys = core = None
+            if phys is not None and core is not None:
+                pairs.add((phys, core))
+            return len(pairs)
+    except Exception:  # noqa: BLE001 — detection is best-effort
+        return 0
+    return 0
+
+
 def _settings() -> dict:
     """Resolve runtime settings: env overrides > defaults."""
     return {
@@ -128,6 +201,13 @@ def _settings() -> dict:
         "ctx_size": _int_env("LLAMA_CPP_CTX_SIZE", 2048),
         "n_gpu_layers": _int_env("LLAMA_CPP_N_GPU_LAYERS", 0),
         "parallel": _int_env("LLAMA_CPP_PARALLEL", 1),
+        # 0 = omit the flag and let llama.cpp pick.
+        "threads": _int_env("LLAMA_CPP_THREADS", _physical_cores()),
+        # Quantized KV cache is the single biggest RAM lever on small hosts.
+        "cache_type_k": _str_env("LLAMA_CPP_CACHE_TYPE_K", "q8_0"),
+        "cache_type_v": _str_env("LLAMA_CPP_CACHE_TYPE_V", "q8_0"),
+        # Jinja chat templates are what make tool-calling models usable.
+        "jinja": _bool_env("LLAMA_CPP_JINJA", True),
     }
 
 
@@ -448,6 +528,18 @@ def serve(alias: str) -> str:
     api_key = (os.environ.get("LLAMA_CPP_API_KEY") or "").strip()
     if api_key:
         cmd += ["--api-key", api_key]
+    # CPU-only tuning. Each flag is additive and independently overridable:
+    #   --threads          physical cores beat logical ones for llama.cpp matmuls
+    #   --cache-type-k/v   q8_0 KV cache roughly halves cache RAM vs f16
+    #   --jinja            enables the model's chat template => tool-calling works
+    if int(s["threads"]) > 0:
+        cmd += ["--threads", str(s["threads"]), "--threads-batch", str(s["threads"])]
+    if s["cache_type_k"]:
+        cmd += ["--cache-type-k", str(s["cache_type_k"])]
+    if s["cache_type_v"]:
+        cmd += ["--cache-type-v", str(s["cache_type_v"])]
+    if s["jinja"]:
+        cmd += ["--jinja"]
     install.install_root().mkdir(parents=True, exist_ok=True)
     log_path = install.install_root() / install.SERVER_LOG_FILE_NAME
     log_file = open(log_path, "ab")

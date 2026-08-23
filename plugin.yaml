@@ -63,3 +63,19 @@ config_schema:
     type: str
     default: ""
     description: "GitHub download/clone base (for GitHub Enterprise). Empty = https://github.com."
+  threads:
+    type: int
+    default: 0
+    description: "llama-server --threads / --threads-batch. 0 = auto-detect physical cores."
+  cache_type_k:
+    type: str
+    default: "q8_0"
+    description: "KV cache type for K (--cache-type-k). q8_0 halves cache RAM vs f16; f16 for max quality."
+  cache_type_v:
+    type: str
+    default: "q8_0"
+    description: "KV cache type for V (--cache-type-v). Keep in step with cache_type_k."
+  jinja:
+    type: bool
+    default: true
+    description: "Pass --jinja so the model's chat template loads (required for tool-calling models)."
