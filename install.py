@@ -65,8 +65,12 @@ def _is_macos() -> bool:
 
 
 @contextmanager
-def _install_lock():
-    """Interprocess lock for install root, stdlib-only (fcntl/msvcrt)."""
+def _install_lock(timeout: float = 30.0):
+    """Interprocess lock for install root, stdlib-only (fcntl/msvcrt).
+
+    POSIX path polls with LOCK_NB so a hung holder (e.g. stalled cmake) does
+    not block uninstall/install forever; Windows already has NBLCK semantics.
+    """
     lock_path = install_root() / ".install.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fh = None
@@ -86,7 +90,20 @@ def _install_lock():
         else:
             try:
                 import fcntl
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                deadline = time.time() + timeout
+                while True:
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.time() >= deadline:
+                            fh.close()
+                            raise RuntimeError(
+                                f"install lock held — another install/upgrade is running (waited {timeout:.0f}s)"
+                            ) from None
+                        time.sleep(0.1)
+            except RuntimeError:
+                raise
             except Exception as exc:
                 fh.close()
                 raise RuntimeError(f"install lock failed: {exc}") from exc
@@ -390,17 +407,34 @@ def _check_impl(*, fetch_latest: bool = True) -> dict:
 def _source_remote_head() -> str | None:
     """Return the current master commit of the llama.cpp upstream repo.
 
-    Uses the GitHub API (no local checkout required). Returns None when the
-    network or API is unavailable, so callers treat it as "unknown", never as
-    "outdated".
+    Uses the GitHub API (no local checkout required). Results are cached
+    alongside _latest_tag (same TTL) so repeated check/install calls do not
+    add an extra network round-trip.
     """
+    cache = _cache_dir() / "source_head.json"
+    try:
+        if cache.is_file():
+            data = json.loads(cache.read_text())
+            if time.time() - float(data.get("ts", 0)) < _TAG_CACHE_TTL:
+                sha = data.get("sha")
+                if isinstance(sha, str) and sha:
+                    return sha
+    except Exception:
+        pass
     url = f"{GITHUB_API}/repos/{REPO}/commits/master"
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read().decode())
             sha = data.get("sha")
-            return str(sha) if isinstance(sha, str) and sha else None
+            shastr = str(sha) if isinstance(sha, str) and sha else None
+            if shastr:
+                try:
+                    _cache_dir().mkdir(parents=True, exist_ok=True)
+                    cache.write_text(json.dumps({"sha": shastr, "ts": time.time()}))
+                except Exception:
+                    pass
+            return shastr
     except Exception:  # noqa: BLE001 — offline / rate-limited: freshness unknown
         return None
 
