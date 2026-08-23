@@ -401,6 +401,12 @@ def serve(alias: str) -> str:
         "--n-gpu-layers", str(s["n_gpu_layers"]),
         "--parallel", str(s["parallel"]),
     ]
+    # Optional server-side auth: when LLAMA_CPP_API_KEY is set (via plugin
+    # config `api_key` or env var), the provider sends it as Bearer and the
+    # server must require it, so pass --api-key to llama-server.
+    api_key = (os.environ.get("LLAMA_CPP_API_KEY") or "").strip()
+    if api_key:
+        cmd += ["--api-key", api_key]
     install.install_root().mkdir(parents=True, exist_ok=True)
     log_path = install.install_root() / install.SERVER_LOG_FILE_NAME
     log_file = open(log_path, "ab")

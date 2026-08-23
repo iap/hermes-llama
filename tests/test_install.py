@@ -465,6 +465,52 @@ def test_check_reports_stale_source_build():
         install._latest_tag, install._smoke_test, install.find_binary = saved_latest
 
 
+def test_wire_config_derives_base_url():
+    """_wire_config derives LLAMA_CPP_BASE_URL from host/port when no base_url."""
+    from pathlib import Path as _Path
+    import importlib.util as _ilu
+    import os as _os
+    import sys as _sys
+    import types as _types
+    # stub the Hermes-only `providers` package so __init__.py can be imported
+    if "providers" not in _sys.modules:
+        _stub_providers = _types.ModuleType("providers")
+        _stub_providers.register_provider = lambda p: None  # noqa: ARG001
+        _sys.modules["providers"] = _stub_providers
+    if "providers.base" not in _sys.modules:
+        _stub_base = _types.ModuleType("providers.base")
+        class _PP:  # minimal ProviderProfile
+            def __init__(self, **kw): self.__dict__.update(kw)
+        _stub_base.ProviderProfile = _PP
+        _sys.modules["providers.base"] = _stub_base
+    _p = _Path(__file__).resolve().parents[1] / "__init__.py"
+    _spec = _ilu.spec_from_file_location("_hmaudit_init", _p)
+    assert _spec is not None and _spec.loader is not None
+    _mod = _ilu.module_from_spec(_spec)
+    _sys.modules["_hmaudit_init"] = _mod
+    _spec.loader.exec_module(_mod)
+    class _Ctx:
+        def get_config(self, k):
+            return {"host": "192.168.1.2", "port": 9999}.get(k)
+    saved = {n: _os.environ.get(n) for n in ("LLAMA_CPP_BASE_URL","LLAMA_CPP_HOST","LLAMA_CPP_PORT")}
+    for n in saved: _os.environ.pop(n, None)
+    try:
+        _mod._wire_config(_Ctx())
+        assert _os.environ.get("LLAMA_CPP_BASE_URL") == "http://192.168.1.2:9999/v1"
+        assert _os.environ.get("LLAMA_CPP_HOST") == "192.168.1.2"
+        assert _os.environ.get("LLAMA_CPP_PORT") == "9999"
+        # explicit base_url wins
+        _os.environ["LLAMA_CPP_BASE_URL"] = "http://explicit:8000/v1"
+        _os.environ.pop("LLAMA_CPP_HOST", None)
+        class _Ctx2:
+            def get_config(self, k): return {"host":"1.1.1.1","port":1234}.get(k)
+        _mod._wire_config(_Ctx2())
+        assert _os.environ["LLAMA_CPP_BASE_URL"] == "http://explicit:8000/v1"
+    finally:
+        for n, v in saved.items():
+            _os.environ.pop(n, None)
+            if v is not None: _os.environ[n] = v
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

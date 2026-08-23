@@ -124,6 +124,10 @@ def _wire_config(ctx: Any) -> None:
     settings (``plugins.entries.<id>.settings.<key>``) is applied. Schema
     defaults are never written into the environment, so ``backend=auto``
     detection and the modules' own defaults stay intact.
+
+    When ``host`` or ``port`` are set and no explicit ``LLAMA_CPP_BASE_URL`` is
+    configured, the provider base URL is derived as ``http://{host}:{port}/v1``
+    so the server and provider agree on the endpoint.
     """
     if not hasattr(ctx, "get_config"):
         return
@@ -136,6 +140,14 @@ def _wire_config(ctx: Any) -> None:
             val = None
         if val is not None and str(val).strip() != "":
             os.environ[env_name] = str(val).strip()
+    # Derive provider base URL from host+port when not explicitly set.
+    if not os.environ.get("LLAMA_CPP_BASE_URL"):
+        host = (os.environ.get("LLAMA_CPP_HOST") or "").strip()
+        port = (os.environ.get("LLAMA_CPP_PORT") or "").strip()
+        if host or port:
+            base_host = host or "127.0.0.1"
+            base_port = port or "8080"
+            os.environ["LLAMA_CPP_BASE_URL"] = f"http://{base_host}:{base_port}/v1"
 
 
 def register(ctx: Any) -> None:
