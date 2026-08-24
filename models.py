@@ -705,13 +705,42 @@ def serve(alias: str) -> str:
     )
 
 
+def _windows_send_ctrl_break(pid: int) -> bool:
+    """Send CTRL_BREAK_EVENT to a Windows process group for graceful shutdown.
+
+    llama-server handles SIGBREAK as a graceful exit. Returns True if the
+    event was delivered. Returns False when the call fails (no console,
+    process already gone) so the caller can fall back to a force kill.
+    """
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # CTRL_BREAK_EVENT = 1; CTRL_C_EVENT cannot be sent to a process
+        # group from another process group, but CTRL_BREAK can.
+        CTRL_BREAK_EVENT = 1
+        return bool(kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid))
+    except Exception:
+        return False
+
+
 def stop() -> str:
     pid = _find_loaded_server()
     if pid is None:
         return "No llama-server running."
     try:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+            # Graceful first: send Ctrl+Break to the process group. llama-server
+            # treats SIGBREAK as a graceful exit. Poll briefly; if the process
+            # survives, fall back to a force kill — symmetric with the POSIX
+            # SIGTERM → poll → SIGKILL path below.
+            _windows_send_ctrl_break(pid)
+            for _ in range(15):
+                time.sleep(0.2)
+                if not _pid_alive(pid) or not _is_llama_server(pid):
+                    break
+            else:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
         else:
             try:
                 os.killpg(pid, signal.SIGTERM)
@@ -752,8 +781,8 @@ def stop_loaded_server() -> bool:
     ``bin/`` from under a live process.
 
     Confirmation deliberately probes the process rather than the pid file:
-    ``stop()`` unlinks the pid file even when the kill did not take effect, so
-    ``_find_loaded_server()`` alone would report a still-running server as gone.
+    ``stop()`` now leaves the pid file in place when the kill does not take
+    effect, so a still-running server stays discoverable.
     """
     try:
         pid = _find_loaded_server()
