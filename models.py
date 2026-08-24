@@ -663,6 +663,15 @@ def serve(alias: str) -> str:
         cmd += ["--jinja"]
     install.install_root().mkdir(parents=True, exist_ok=True)
     log_path = install.install_root() / install.SERVER_LOG_FILE_NAME
+    # Rotate: if server.log exceeds 10 MiB, move it to .log.1 (one-deep
+    # history) before opening a fresh log. A long-running host that
+    # sleeps/wakes and restarts the server over months would otherwise
+    # accumulate an unbounded log.
+    if log_path.is_file() and log_path.stat().st_size > 10 * 1024 * 1024:
+        try:
+            log_path.rename(log_path.with_suffix(".log.1"))
+        except Exception:  # noqa: BLE001 — best-effort; fall through to append
+            pass
     log_file = open(log_path, "ab")
     try:
         if sys.platform == "win32":
