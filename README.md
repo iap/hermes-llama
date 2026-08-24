@@ -54,6 +54,28 @@ hermes plugins install iap/hermes-llama --enable
 
 The same subcommands are available in a terminal as `hermes llama <sub> …`.
 
+## Operations & file layout
+
+Everything lives under `$HERMES_HOME/llama-cpp/`:
+
+| Path | Purpose |
+|---|---|
+| `bin/llama-server` | The installed server binary (prebuilt or source-built) |
+| `models/<org>__<repo>/<file>.gguf` | Downloaded GGUF weights (never deleted by uninstall) |
+| `models.json` | Registry of pulled models: alias → path, size, sha256 when known |
+| `server.log` | llama-server stdout/stderr (append mode; check here first when serve fails) |
+| `server.pid` | PID file for the running server (removed on stop) |
+| `.version` | Install metadata: tag/method/backend/commit — powers `check` freshness |
+| `.cache/source_head.json`, `.cache/tag.json` | Upstream freshness caches (600 s TTL) |
+| `.install.lock`, `.registry.lock` | Interprocess locks (install vs model pulls) |
+
+**Ports:** llama-server listens on `127.0.0.1:8080/v1` (configurable). The Hermes
+dashboard's model list at `127.0.0.1:9119/models` is a *different* service — it
+shows the "Llama CPP" provider entry but does not proxy to the server.
+
+**Exit codes:** `hermes llama …` subcommands print a human-readable result and do
+not set a meaningful exit status yet; scripts should parse output, not `$?`.
+
 ## Sample models
 
 | Alias | Repo / file | Size | Licence | Note |
