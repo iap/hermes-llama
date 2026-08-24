@@ -361,61 +361,15 @@ def _verify_sha256(path: Path, expected: str | None) -> None:
 def _download_model(url: str, dest: Path, *, expected_sha256: str | None = None) -> None:
     """Download a model file robustly.
 
-    Prefers ``curl`` when available because Python's ``urllib`` can stall for
-    minutes before the first byte arrives against Hugging Face's Xet CDN
-    (``us.aws.cdn.hf.co``) redirects. ``curl`` starts the transfer immediately.
-    Falls back to ``urllib`` when ``curl`` is absent. Raises on failure.
-
-    When *expected_sha256* is supplied, the staged ``.part`` file is hashed and
-    must match before it is promoted to *dest* — so a corrupted or substituted
-    payload never lands under its final name. A byte-count check still runs
-    first because it is far cheaper than hashing a multi-GiB file.
+    Thin wrapper around the shared download helper. Adds sha256 verification
+    when an expected digest is supplied.
     """
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    curl = shutil.which("curl")
-    try:
-        if curl:
-            proc = subprocess.run(
-                [curl, "-L", "--fail", "--retry", "3", "--retry-delay", "2",
-                 "--retry-all-errors", "-C", "-",
-                 "-A", "hermes-llama", "-o", str(tmp), url],
-                capture_output=True, text=True, timeout=7200,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]}")
-            # Size sanity only (non-empty): no second HEAD request here. On
-            # Xet-backed assets a HEAD returns the redirect-stub size (~1 KB),
-            # which previously failed every download with a spurious "download
-            # truncated". Real integrity is enforced by expected_sha256 below.
-            if tmp.stat().st_size == 0:
-                raise RuntimeError("download truncated: curl wrote 0 bytes")
-            _verify_sha256(tmp, expected_sha256)
-            os.replace(tmp, dest)
-            return
-        req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
-        with urllib.request.urlopen(req, timeout=3600) as resp, open(tmp, "wb") as out:
-            if getattr(resp, "status", 200) != 200:
-                raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
-            expected_len = None
-            try:
-                raw = resp.headers.get("X-Linked-Size") if hasattr(resp, "headers") else None
-                if raw:
-                    expected_len = int(str(raw).strip())
-                else:
-                    raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
-                    if raw and int(str(raw).strip()) > 1024 * 1024:
-                        expected_len = int(str(raw).strip())
-            except Exception:
-                pass
-            shutil.copyfileobj(resp, out, length=1024 * 1024)
-            out.flush()
-            if expected_len is not None and tmp.stat().st_size != expected_len:
-                raise RuntimeError(f"download truncated: Content-Length {expected_len}, got {tmp.stat().st_size}")
-        _verify_sha256(tmp, expected_sha256)
-        os.replace(tmp, dest)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    from . import _download as _shared_download
+
+    def _verify_sha(path: Path) -> None:
+        _verify_sha256(path, expected_sha256)
+
+    _shared_download.download_file(url, dest, timeout=7200, verify=_verify_sha if expected_sha256 else None)
 
 
 def pull(spec: str, alias: str | None = None) -> str:

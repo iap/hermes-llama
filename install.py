@@ -629,46 +629,10 @@ def _latest_tag() -> str | None:
 
 
 def _download(url: str, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    curl = shutil.which("curl")
-    try:
-        if curl:
-            proc = subprocess.run(
-                [curl, "-L", "--fail", "--retry", "3", "--retry-delay", "2",
-                 "--retry-all-errors", "-C", "-", "-A", "hermes-llama", "-o", str(tmp), url],
-                capture_output=True, text=True, timeout=600,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]} (exit {proc.returncode})")
-            # Size sanity only: a non-empty file is accepted here. The previous
-            # version fetched Content-Length via a second HEAD request, which on
-            # Xet-backed assets returns the redirect-stub size (~1 KB) instead of
-            # the real body size, failing every download with a spurious
-            # "download truncated" (the same defect fixed for models.py). Real
-            # integrity is enforced by the caller's checksum when available.
-            if tmp.stat().st_size == 0:
-                raise RuntimeError("download truncated: curl wrote 0 bytes")
-            os.replace(tmp, dest)
-            return
-        with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as out:
-            if getattr(resp, "status", 200) != 200:
-                raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
-            expected_len = None
-            try:
-                raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
-                if raw: expected_len = int(str(raw).strip())
-            except Exception:
-                pass
-            shutil.copyfileobj(resp, out, length=1024 * 1024)
-            out.flush()
-            if expected_len is not None and tmp.stat().st_size != expected_len:
-                raise RuntimeError(f"download truncated: Content-Length {expected_len}, got {tmp.stat().st_size}")
-        os.replace(tmp, dest)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    """Download a file — thin wrapper around the shared download helper."""
+    from . import _download as _shared_download
+
+    _shared_download.download_file(url, dest, timeout=600)
 
 
 def _download_cached(tag: str, asset: str) -> Path | None:
