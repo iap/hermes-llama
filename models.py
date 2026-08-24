@@ -771,4 +771,11 @@ def status() -> str:
                 lines.append(f"health: HTTP {resp.status} {resp.read().decode().strip()}")
         except Exception:
             lines.append("health: unreachable (model may still be loading)")
+        try:
+            with urllib.request.urlopen(f"{base}/v1/models", timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                ids = [m["id"] for m in data.get("data", []) if m.get("id")]
+                lines.append(f"model loaded: {', '.join(ids) if ids else '(none)'}")
+        except Exception:
+            lines.append("model loaded: (unreachable)")
     return "\n".join(lines)
