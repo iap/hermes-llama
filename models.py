@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -38,7 +37,7 @@ def _hf_base() -> str:
 #   * Qwen2.5 / SmolLM2 — Apache-2.0: permissive, commercial use allowed, and
 #     tool-calling capable (pair with llama-server ``--jinja``).
 # Sizes are the real GGUF byte sizes from the HF tree API, not estimates.
-LIQUIDAI_PRESETS = {
+MODEL_PRESETS = {
     "liquidai": {
         "alias": "liquidai-lfm2-1.2b",
         "repo": "LiquidAI/LFM2-1.2B-GGUF",
@@ -96,6 +95,25 @@ LIQUIDAI_PRESETS = {
 def _model_dest(repo: str, local_name: str) -> Path:
     """Model file location, namespaced by repo to avoid basename collisions."""
     return install.models_dir() / repo.replace("/", "__") / local_name
+
+
+def _to_rel_path(path: Path) -> str:
+    """Convert an absolute model path to relative (models_dir) for portable storage."""
+    try:
+        return str(Path(path).relative_to(install.models_dir()))
+    except ValueError:
+        return str(path)  # not under models_dir — store as-is
+
+
+def _from_rel_path(rel_or_abs: str) -> Path:
+    """Resolve a registry path (relative or absolute) to an absolute Path.
+
+    Handles both legacy absolute entries and portable relative ones.
+    """
+    p = Path(rel_or_abs)
+    if p.is_absolute():
+        return p  # legacy absolute entry
+    return install.models_dir() / p
 
 
 def _registry_path() -> Path:
@@ -171,7 +189,7 @@ def _registry_txn():
 
 def list_models() -> str:
     lines = ["Presets (not yet downloaded):"]
-    for name, p in LIQUIDAI_PRESETS.items():
+    for name, p in MODEL_PRESETS.items():
         lines.append(
             f"  {name:<16} {p['repo']} · {p['file']} (~{p['size_gb']} GB) — {p['note']}"
         )
@@ -185,28 +203,25 @@ def list_models() -> str:
     return "\n".join(lines)
 
 
-def _int_env(name: str, default: int) -> int:
-    """Parse an integer env var defensively (fall back to default on garbage)."""
-    raw = os.environ.get(name, "").strip()
+def _env(name: str, default: str, *, type_: type = str, truthy: frozenset[str] | None = None) -> str | int | bool:
+    """Read and parse an env var with a default.
+
+    ``type_`` controls coercion: ``str`` (default), ``int`` (falls back to
+    *default* on garbage), or ``bool`` (checks against *truthy*, default
+    ``{"1", "true", "yes", "on"}``).
+    """
+    raw = (os.environ.get(name, "") or "").strip()
     if not raw:
         return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _str_env(name: str, default: str) -> str:
-    """Read a string env var, falling back to *default* when unset/blank."""
-    return (os.environ.get(name, "") or "").strip() or default
-
-
-def _bool_env(name: str, default: bool) -> bool:
-    """Parse a boolean env var ("1/true/yes/on" == True), else *default*."""
-    raw = (os.environ.get(name, "") or "").strip().lower()
-    if not raw:
-        return default
-    return raw in ("1", "true", "yes", "on")
+    if type_ is bool:
+        truthy_vals = truthy if truthy is not None else frozenset({"1", "true", "yes", "on"})
+        return raw.lower() in truthy_vals
+    if type_ is int:
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+    return raw
 
 
 def _physical_cores() -> int:
@@ -245,17 +260,17 @@ def _settings() -> dict:
     """Resolve runtime settings: env overrides > defaults."""
     return {
         "host": os.environ.get("LLAMA_CPP_HOST", "127.0.0.1"),
-        "port": _int_env("LLAMA_CPP_PORT", 8080),
-        "ctx_size": _int_env("LLAMA_CPP_CTX_SIZE", 2048),
-        "n_gpu_layers": _int_env("LLAMA_CPP_N_GPU_LAYERS", 0),
-        "parallel": _int_env("LLAMA_CPP_PARALLEL", 1),
+        "port": _env("LLAMA_CPP_PORT", 8080, type_=int),
+        "ctx_size": _env("LLAMA_CPP_CTX_SIZE", 2048, type_=int),
+        "n_gpu_layers": _env("LLAMA_CPP_N_GPU_LAYERS", 0, type_=int),
+        "parallel": _env("LLAMA_CPP_PARALLEL", 1, type_=int),
         # 0 = omit the flag and let llama.cpp pick.
-        "threads": _int_env("LLAMA_CPP_THREADS", _physical_cores()),
+        "threads": _env("LLAMA_CPP_THREADS", _physical_cores(), type_=int),
         # Quantized KV cache is the single biggest RAM lever on small hosts.
-        "cache_type_k": _str_env("LLAMA_CPP_CACHE_TYPE_K", "q8_0"),
-        "cache_type_v": _str_env("LLAMA_CPP_CACHE_TYPE_V", "q8_0"),
+        "cache_type_k": _env("LLAMA_CPP_CACHE_TYPE_K", "q8_0"),
+        "cache_type_v": _env("LLAMA_CPP_CACHE_TYPE_V", "q8_0"),
         # Jinja chat templates are what make tool-calling models usable.
-        "jinja": _bool_env("LLAMA_CPP_JINJA", True),
+        "jinja": _env("LLAMA_CPP_JINJA", True, type_=bool),
     }
 
 
@@ -265,7 +280,7 @@ def _resolve_model(spec: str) -> tuple[str, str, str] | None:
     Accepts either a preset key (e.g. ``liquidai``) or a Hugging Face repo id
     (``Org/Repo``), in which case the first ``*.gguf`` sibling is used.
     """
-    preset = LIQUIDAI_PRESETS.get(spec.lower())
+    preset = MODEL_PRESETS.get(spec.lower())
     if preset:
         return preset["repo"], preset["file"], preset["alias"]
     if "/" in spec and not spec.lower().endswith(".gguf"):
@@ -361,68 +376,22 @@ def _verify_sha256(path: Path, expected: str | None) -> None:
 def _download_model(url: str, dest: Path, *, expected_sha256: str | None = None) -> None:
     """Download a model file robustly.
 
-    Prefers ``curl`` when available because Python's ``urllib`` can stall for
-    minutes before the first byte arrives against Hugging Face's Xet CDN
-    (``us.aws.cdn.hf.co``) redirects. ``curl`` starts the transfer immediately.
-    Falls back to ``urllib`` when ``curl`` is absent. Raises on failure.
-
-    When *expected_sha256* is supplied, the staged ``.part`` file is hashed and
-    must match before it is promoted to *dest* — so a corrupted or substituted
-    payload never lands under its final name. A byte-count check still runs
-    first because it is far cheaper than hashing a multi-GiB file.
+    Thin wrapper around the shared download helper. Adds sha256 verification
+    when an expected digest is supplied.
     """
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    curl = shutil.which("curl")
-    try:
-        if curl:
-            proc = subprocess.run(
-                [curl, "-L", "--fail", "--retry", "3", "--retry-delay", "2",
-                 "--retry-all-errors", "-C", "-",
-                 "-A", "hermes-llama", "-o", str(tmp), url],
-                capture_output=True, text=True, timeout=7200,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]}")
-            # Size sanity only (non-empty): no second HEAD request here. On
-            # Xet-backed assets a HEAD returns the redirect-stub size (~1 KB),
-            # which previously failed every download with a spurious "download
-            # truncated". Real integrity is enforced by expected_sha256 below.
-            if tmp.stat().st_size == 0:
-                raise RuntimeError("download truncated: curl wrote 0 bytes")
-            _verify_sha256(tmp, expected_sha256)
-            os.replace(tmp, dest)
-            return
-        req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
-        with urllib.request.urlopen(req, timeout=3600) as resp, open(tmp, "wb") as out:
-            if getattr(resp, "status", 200) != 200:
-                raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
-            expected_len = None
-            try:
-                raw = resp.headers.get("X-Linked-Size") if hasattr(resp, "headers") else None
-                if raw:
-                    expected_len = int(str(raw).strip())
-                else:
-                    raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
-                    if raw and int(str(raw).strip()) > 1024 * 1024:
-                        expected_len = int(str(raw).strip())
-            except Exception:
-                pass
-            shutil.copyfileobj(resp, out, length=1024 * 1024)
-            out.flush()
-            if expected_len is not None and tmp.stat().st_size != expected_len:
-                raise RuntimeError(f"download truncated: Content-Length {expected_len}, got {tmp.stat().st_size}")
-        _verify_sha256(tmp, expected_sha256)
-        os.replace(tmp, dest)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    from . import _download as _shared_download
+
+    def _verify_sha(path: Path) -> None:
+        _verify_sha256(path, expected_sha256)
+
+    _shared_download.download_file(url, dest, timeout=7200, verify=_verify_sha if expected_sha256 else None)
 
 
 def pull(spec: str, alias: str | None = None) -> str:
     """Download a GGUF model into the plugin models dir and register it."""
     resolved = _resolve_model(spec)
     if resolved is None:
-        return f"Unknown model spec '{spec}'. Use a preset ({', '.join(LIQUIDAI_PRESETS)}) or Org/Repo."
+        return f"Unknown model spec '{spec}'. Use a preset ({', '.join(MODEL_PRESETS)}) or Org/Repo."
     repo, file, default_alias = resolved
     if not file:
         file = _pick_gguf_file(repo)
@@ -459,7 +428,7 @@ def pull(spec: str, alias: str | None = None) -> str:
                         f"Run `/llama pull {spec}` again to re-download."
                     )
             entry = {
-                "repo": repo, "file": local_name, "path": str(dest),
+                "repo": repo, "file": local_name, "path": _to_rel_path(dest),
                 "size_gb": round(sz / 1024**3, 2),
             }
             if expected:
@@ -478,7 +447,7 @@ def pull(spec: str, alias: str | None = None) -> str:
     except Exception as exc:
         return f"Download failed: {exc}"
     size_gb = round(dest.stat().st_size / 1024**3, 2)
-    entry = {"repo": repo, "file": local_name, "path": str(dest), "size_gb": size_gb}
+    entry = {"repo": repo, "file": local_name, "path": _to_rel_path(dest), "size_gb": size_gb}
     if expected:
         entry["sha256"] = expected
     with _registry_txn() as reg:
@@ -588,8 +557,14 @@ def _find_loaded_server() -> int | None:
 
 
 def _wait_healthy(base: str, timeout: float = 60.0) -> bool:
-    """Poll ``/health`` until the server reports ready (or timeout)."""
+    """Poll ``/health`` until the server reports ready (or timeout).
+
+    Uses exponential backoff: 1s → 2s → 4s → 8s (capped). A local server
+    usually responds within the first few polls, so this avoids wasting
+    CPU on tight sleeps during the (rare) long tail of a slow GPU load.
+    """
     deadline = time.time() + timeout
+    delay = 1.0
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(f"{base}/health", timeout=3) as resp:
@@ -597,7 +572,8 @@ def _wait_healthy(base: str, timeout: float = 60.0) -> bool:
                     return True
         except Exception:  # noqa: BLE001 — best-effort read
             pass
-        time.sleep(1)
+        time.sleep(delay)
+        delay = min(delay * 2, 8.0)
     return False
 
 
@@ -631,11 +607,17 @@ def serve(alias: str) -> str:
             return f"Model '{alias}' is not downloaded yet. Run `/llama pull {alias}` first."
 
     serve_alias = model.get("alias", alias)
+    # Validate the model file exists before launching — a stale registry
+    # entry (file deleted, path moved) would otherwise cause llama-server
+    # to fail with an opaque error.
+    model_path = _from_rel_path(model["path"])
+    if not model_path.is_file():
+        return f"Model file not found: {model_path}. Run `/llama pull {alias}` to re-download."
     s = _settings()
     # Explicit --alias keeps the /v1/models id clean and stable.
     cmd = [
         str(binary),
-        "--model", model["path"],
+        "--model", str(model_path),
         "--alias", serve_alias,
         "--host", s["host"],
         "--port", str(s["port"]),
@@ -663,6 +645,15 @@ def serve(alias: str) -> str:
         cmd += ["--jinja"]
     install.install_root().mkdir(parents=True, exist_ok=True)
     log_path = install.install_root() / install.SERVER_LOG_FILE_NAME
+    # Rotate: if server.log exceeds 10 MiB, move it to .log.1 (one-deep
+    # history) before opening a fresh log. A long-running host that
+    # sleeps/wakes and restarts the server over months would otherwise
+    # accumulate an unbounded log.
+    if log_path.is_file() and log_path.stat().st_size > 10 * 1024 * 1024:
+        try:
+            log_path.rename(log_path.with_suffix(".log.1"))
+        except Exception:  # noqa: BLE001 — best-effort; fall through to append
+            pass
     log_file = open(log_path, "ab")
     try:
         if sys.platform == "win32":
@@ -697,12 +688,31 @@ def serve(alias: str) -> str:
             pass
         return f"llama-server exited immediately (exit {code}). {tail}"
     base = f"http://{s['host']}:{s['port']}"
-    ready = _wait_healthy(base, timeout=float(_int_env("LLAMA_CPP_HEALTH_TIMEOUT", 60)))
+    ready = _wait_healthy(base, timeout=float(_env("LLAMA_CPP_HEALTH_TIMEOUT", 60, type_=int)))
     state = "ready" if ready else "still loading (watch `/llama status`)"
     return (
         f"Started llama-server (pid {proc.pid}) with model '{serve_alias}' on "
         f"{base}/v1 — {state}. It will appear as provider 'Llama CPP'."
     )
+
+
+def _windows_send_ctrl_break(pid: int) -> bool:
+    """Send CTRL_BREAK_EVENT to a Windows process group for graceful shutdown.
+
+    llama-server handles SIGBREAK as a graceful exit. Returns True if the
+    event was delivered. Returns False when the call fails (no console,
+    process already gone) so the caller can fall back to a force kill.
+    """
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # CTRL_BREAK_EVENT = 1; CTRL_C_EVENT cannot be sent to a process
+        # group from another process group, but CTRL_BREAK can.
+        CTRL_BREAK_EVENT = 1
+        return bool(kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid))
+    except Exception:
+        return False
 
 
 def stop() -> str:
@@ -711,7 +721,17 @@ def stop() -> str:
         return "No llama-server running."
     try:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+            # Graceful first: send Ctrl+Break to the process group. llama-server
+            # treats SIGBREAK as a graceful exit. Poll briefly; if the process
+            # survives, fall back to a force kill — symmetric with the POSIX
+            # SIGTERM → poll → SIGKILL path below.
+            _windows_send_ctrl_break(pid)
+            for _ in range(15):
+                time.sleep(0.2)
+                if not _pid_alive(pid) or not _is_llama_server(pid):
+                    break
+            else:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
         else:
             try:
                 os.killpg(pid, signal.SIGTERM)
@@ -729,6 +749,12 @@ def stop() -> str:
                     pass
     except Exception as exc:
         return f"Failed to stop pid {pid}: {exc}"
+    # Confirm the process is actually gone before unlinking the pid file.
+    # If the kill did not take effect, leave the pid file in place so
+    # _find_loaded_server() still reports the server as running instead of
+    # silently losing track of a live process.
+    if _pid_alive(pid) and _is_llama_server(pid):
+        return f"Failed to stop llama-server (pid {pid}): process still running."
     _server_pid_path().unlink(missing_ok=True)
     return f"Stopped llama-server (pid {pid})."
 
@@ -746,8 +772,8 @@ def stop_loaded_server() -> bool:
     ``bin/`` from under a live process.
 
     Confirmation deliberately probes the process rather than the pid file:
-    ``stop()`` unlinks the pid file even when the kill did not take effect, so
-    ``_find_loaded_server()`` alone would report a still-running server as gone.
+    ``stop()`` now leaves the pid file in place when the kill does not take
+    effect, so a still-running server stays discoverable.
     """
     try:
         pid = _find_loaded_server()
@@ -773,4 +799,11 @@ def status() -> str:
                 lines.append(f"health: HTTP {resp.status} {resp.read().decode().strip()}")
         except Exception:
             lines.append("health: unreachable (model may still be loading)")
+        try:
+            with urllib.request.urlopen(f"{base}/v1/models", timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                ids = [m["id"] for m in data.get("data", []) if m.get("id")]
+                lines.append(f"model loaded: {', '.join(ids) if ids else '(none)'}")
+        except Exception:
+            lines.append("model loaded: (unreachable)")
     return "\n".join(lines)

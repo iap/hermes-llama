@@ -52,10 +52,6 @@ def _github_api() -> str:
     return f"{_github_api_base()}/repos/{REPO}"
 
 
-# Back-compat aliases; prefer the functions.
-GITHUB_BASE = _github_base()
-GITHUB_API = _github_api()
-
 SERVER_BIN = "llama-server.exe" if sys.platform == "win32" else "llama-server"
 BACKENDS = ("cpu", "cuda", "vulkan", "source")
 
@@ -352,13 +348,21 @@ def find_binary() -> Path | None:
     return None
 
 
-def _smoke_test(binary: Path, timeout: float = 8.0) -> tuple[bool, str]:
+def _smoke_test(binary: Path, timeout: float | None = None) -> tuple[bool, str]:
     """Run ``--version``. Returns ``(ok, info)``.
 
     Catches the subtle failure where a prebuilt was compiled for a newer OS than
     the host (Mach-O ``minos`` exceeds the running macOS): such a binary HANGS on
     launch rather than printing an error.
+
+    Timeout can be overridden via ``LLAMA_CPP_SMOKE_TIMEOUT`` (seconds) for
+    slow-storage hosts where first-launch binary loading exceeds the 8s default.
     """
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("LLAMA_CPP_SMOKE_TIMEOUT", "8.0"))
+        except Exception:
+            timeout = 8.0
     try:
         proc = subprocess.run(
             [str(binary), "--version"], capture_output=True, text=True, timeout=timeout
@@ -450,7 +454,9 @@ def _source_remote_head() -> str | None:
 
     Uses the GitHub API (no local checkout required). Results are cached
     alongside _latest_tag (same TTL) so repeated check/install calls do not
-    add an extra network round-trip.
+    add an extra network round-trip. When the cache expires, sends the
+    stored ETag via If-None-Match — a 304 refreshes the cache timestamp
+    without burning a rate-limit token.
     """
     cache = _cache_dir() / "source_head.json"
     try:
@@ -465,14 +471,37 @@ def _source_remote_head() -> str | None:
     url = _github_api() + "/commits/master"
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+        # Conditional request: if we have a cached ETag, send it. A 304 means
+        # the data hasn't changed — refresh the cache timestamp and reuse.
+        try:
+            if cache.is_file():
+                etag = json.loads(cache.read_text()).get("etag")
+                if isinstance(etag, str) and etag:
+                    req.add_header("If-None-Match", etag)
+        except Exception:  # noqa: BLE001 — cache read is best-effort
+            pass
         with urllib.request.urlopen(req, timeout=20) as resp:
+            if getattr(resp, "status", 200) == 304:
+                # Not modified — refresh the cache timestamp.
+                try:
+                    data = json.loads(cache.read_text())
+                    data["ts"] = time.time()
+                    _cache_dir().mkdir(parents=True, exist_ok=True)
+                    cache.write_text(json.dumps(data))
+                except Exception:  # noqa: BLE001 — cache write is best-effort
+                    pass
+                return json.loads(cache.read_text()).get("sha")
             data = json.loads(resp.read().decode())
             sha = data.get("sha")
             shastr = str(sha) if isinstance(sha, str) and sha else None
             if shastr:
                 try:
+                    etag = resp.headers.get("ETag") if hasattr(resp, "headers") else None
+                    cache_data = {"sha": shastr, "ts": time.time()}
+                    if isinstance(etag, str) and etag:
+                        cache_data["etag"] = etag
                     _cache_dir().mkdir(parents=True, exist_ok=True)
-                    cache.write_text(json.dumps({"sha": shastr, "ts": time.time()}))
+                    cache.write_text(json.dumps(cache_data))
                 except Exception:
                     pass
             return shastr
@@ -564,6 +593,8 @@ def _latest_tag() -> str | None:
     tags. Prefer the latest non-prerelease build tag, falling back to any build
     tag with assets (nightly), so the primary prebuilt path resolves correctly.
     Results are cached briefly to avoid repeated GitHub API hits within a run.
+    When the cache expires, sends the stored ETag via If-None-Match — a 304
+    refreshes the cache timestamp without burning a rate-limit token.
     """
     cache = _cache_dir() / "latest_tag.json"
     try:
@@ -578,9 +609,32 @@ def _latest_tag() -> str | None:
     # bNNNN off the first page (previously per_page=30, single page).
     releases_all: list[dict] = []
     url = _github_api() + "/releases?per_page=100"
+    last_resp = None
     for _ in range(3):
         try:
-            with urllib.request.urlopen(url, timeout=20) as resp:
+            req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+            # Conditional request on the first page only: if we have a cached
+            # ETag, send it. A 304 means the data hasn't changed — refresh the
+            # cache timestamp and reuse.
+            if not releases_all and cache.is_file():
+                try:
+                    etag = json.loads(cache.read_text()).get("etag")
+                    if isinstance(etag, str) and etag:
+                        req.add_header("If-None-Match", etag)
+                except Exception:  # noqa: BLE001 — cache read is best-effort
+                    pass
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                last_resp = resp
+                if getattr(resp, "status", 200) == 304 and not releases_all:
+                    # Not modified — refresh the cache timestamp.
+                    try:
+                        data = json.loads(cache.read_text())
+                        data["ts"] = time.time()
+                        _cache_dir().mkdir(parents=True, exist_ok=True)
+                        cache.write_text(json.dumps(data))
+                    except Exception:  # noqa: BLE001 — cache write is best-effort
+                        pass
+                    return json.loads(cache.read_text()).get("tag")
                 page = json.loads(resp.read().decode())
                 if not isinstance(page, list):
                     break
@@ -621,54 +675,22 @@ def _latest_tag() -> str | None:
                 break
     if tag:
         try:
+            etag = last_resp.headers.get("ETag") if last_resp is not None and hasattr(last_resp, "headers") else None
+            cache_data = {"tag": tag, "ts": time.time()}
+            if isinstance(etag, str) and etag:
+                cache_data["etag"] = etag
             _cache_dir().mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({"tag": tag, "ts": time.time()}))
+            cache.write_text(json.dumps(cache_data))
         except Exception:  # noqa: BLE001 — cache write failure is non-fatal
             pass
     return tag
 
 
 def _download(url: str, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    curl = shutil.which("curl")
-    try:
-        if curl:
-            proc = subprocess.run(
-                [curl, "-L", "--fail", "--retry", "3", "--retry-delay", "2",
-                 "--retry-all-errors", "-C", "-", "-A", "hermes-llama", "-o", str(tmp), url],
-                capture_output=True, text=True, timeout=600,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]} (exit {proc.returncode})")
-            # Size sanity only: a non-empty file is accepted here. The previous
-            # version fetched Content-Length via a second HEAD request, which on
-            # Xet-backed assets returns the redirect-stub size (~1 KB) instead of
-            # the real body size, failing every download with a spurious
-            # "download truncated" (the same defect fixed for models.py). Real
-            # integrity is enforced by the caller's checksum when available.
-            if tmp.stat().st_size == 0:
-                raise RuntimeError("download truncated: curl wrote 0 bytes")
-            os.replace(tmp, dest)
-            return
-        with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as out:
-            if getattr(resp, "status", 200) != 200:
-                raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
-            expected_len = None
-            try:
-                raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
-                if raw: expected_len = int(str(raw).strip())
-            except Exception:
-                pass
-            shutil.copyfileobj(resp, out, length=1024 * 1024)
-            out.flush()
-            if expected_len is not None and tmp.stat().st_size != expected_len:
-                raise RuntimeError(f"download truncated: Content-Length {expected_len}, got {tmp.stat().st_size}")
-        os.replace(tmp, dest)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    """Download a file — thin wrapper around the shared download helper."""
+    from . import _download as _shared_download
+
+    _shared_download.download_file(url, dest, timeout=600)
 
 
 def _download_cached(tag: str, asset: str) -> Path | None:

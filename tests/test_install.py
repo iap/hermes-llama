@@ -54,6 +54,17 @@ def _load_models():
     module = importlib.util.module_from_spec(spec)
     sys.modules[f"{pkg_name}.models"] = module
     spec.loader.exec_module(module)
+
+    # Also load _download.py and attach it to the models module
+    spec = importlib.util.spec_from_file_location(
+        f"{pkg_name}._download", _REPO_ROOT / "_download.py"
+    )
+    assert spec is not None and spec.loader is not None
+    download_mod = importlib.util.module_from_spec(spec)
+    sys.modules[f"{pkg_name}._download"] = download_mod
+    spec.loader.exec_module(download_mod)
+    module._download = download_mod
+
     return module
 
 
@@ -599,7 +610,7 @@ def test_presets_are_wellformed():
     ambiguous).
     """
     models = _load_models()
-    presets = models.LIQUIDAI_PRESETS
+    presets = models.MODEL_PRESETS
     assert presets, "preset catalog is empty"
     aliases = []
     for key, p in presets.items():
@@ -871,10 +882,10 @@ def test_download_model_rejects_bad_checksum():
             return data
 
     tmpdir = tempfile.mkdtemp(prefix="llama-dl-")
-    saved_urlopen, saved_which = _ur.urlopen, models.shutil.which
+    saved_urlopen, saved_which = _ur.urlopen, models._download.shutil.which
     try:
         # Force the urllib branch (no curl) so the test is deterministic.
-        models.shutil.which = lambda name: None
+        models._download.shutil.which = lambda name: None
         _ur.urlopen = lambda req, timeout=3600: _Resp()
         dest = Path(tmpdir) / "model.gguf"
 
@@ -890,7 +901,72 @@ def test_download_model_rejects_bad_checksum():
         assert not dest.with_suffix(dest.suffix + ".part").exists(), ".part left behind"
     finally:
         _ur.urlopen = saved_urlopen
-        models.shutil.which = saved_which
+        models._download.shutil.which = saved_which
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_download_model_resumes_partial():
+    """_download_model resumes from a partial .part file via Range header."""
+    models = _load_models()
+    import urllib.request as _ur
+
+    # The "remaining" bytes that the server should return
+    remaining = b"remaining bytes " * 100
+    full_payload = b"already have " * 50 + remaining
+
+    class _Resp:
+        status = 206  # Partial Content
+        headers = {"Content-Length": str(len(remaining))}
+
+        def __init__(self):
+            self._data = remaining
+            self._sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n=-1):
+            if self._sent:
+                return b""
+            self._sent = True
+            return self._data
+
+    tmpdir = tempfile.mkdtemp(prefix="llama-resume-")
+    saved_urlopen, saved_which = _ur.urlopen, models._download.shutil.which
+    try:
+        models._download.shutil.which = lambda name: None
+
+        # Track the Range header sent
+        captured_headers = {}
+
+        def mock_urlopen(req, timeout=3600):
+            captured_headers.update(dict(req.headers))
+            return _Resp()
+
+        _ur.urlopen = mock_urlopen
+        dest = Path(tmpdir) / "model.gguf"
+
+        # Create a partial file to trigger resume
+        partial = dest.with_suffix(dest.suffix + ".part")
+        partial.write_bytes(b"already have " * 50)
+
+        models._download_model("https://example.invalid/m.gguf", dest)
+
+        # Verify Range header was sent
+        assert "Range" in captured_headers, f"Range header not sent: {captured_headers}"
+        assert captured_headers["Range"] == f"bytes={len(b'already have ' * 50)}-", \
+            f"wrong Range: {captured_headers['Range']}"
+
+        # Verify the final file has both parts
+        assert dest.exists(), "dest not created"
+        content = dest.read_bytes()
+        assert content == full_payload, f"content mismatch: got {len(content)} bytes"
+    finally:
+        _ur.urlopen = saved_urlopen
+        models._download.shutil.which = saved_which
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -1074,11 +1150,11 @@ def test_download_curl_branch_no_second_head():
     curl_stub.chmod(0o755)
     log = Path(tmpdir) / "argv.log"
 
-    saved_which = models.shutil.which
+    saved_which = models._download.shutil.which
     saved_env = os.environ.get("CURL_LOG")
     try:
         os.environ["CURL_LOG"] = str(log)
-        models.shutil.which = lambda name: str(curl_stub) if name == "curl" else None
+        models._download.shutil.which = lambda name: str(curl_stub) if name == "curl" else None
         dest = Path(tmpdir) / "m.gguf"
 
         models._download_model("https://example.invalid/m.gguf", dest)
@@ -1090,7 +1166,7 @@ def test_download_curl_branch_no_second_head():
         assert len(calls) == 1, f"expected 1 curl call, got {len(calls)}: {calls}"
         assert not any("-sI" in c or "--head" in c for c in calls), calls
     finally:
-        models.shutil.which = saved_which
+        models._download.shutil.which = saved_which
         if saved_env is None:
             os.environ.pop("CURL_LOG", None)
         else:
@@ -1116,9 +1192,9 @@ def test_download_curl_branch_zero_byte_fails():
         "exit 0\n"
     )
     curl_stub.chmod(0o755)
-    saved_which = models.shutil.which
+    saved_which = models._download.shutil.which
     try:
-        models.shutil.which = lambda name: str(curl_stub) if name == "curl" else None
+        models._download.shutil.which = lambda name: str(curl_stub) if name == "curl" else None
         dest = Path(tmpdir) / "m.gguf"
         try:
             models._download_model("https://example.invalid/m.gguf", dest)
@@ -1128,7 +1204,7 @@ def test_download_curl_branch_zero_byte_fails():
             raise AssertionError("zero-byte download was accepted")
         assert not dest.exists(), "empty file promoted to dest"
     finally:
-        models.shutil.which = saved_which
+        models._download.shutil.which = saved_which
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

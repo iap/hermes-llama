@@ -73,7 +73,8 @@ no admin, portable per-user.
 |---|---|---|
 | Checksum verification of the binary | deferred | Releases publish **no** `.sha256`/checksums assets (verified). Nothing to verify against; would be fake assurance. |
 | `llama-server --hf-repo` native download | deferred | Removes the local registry + resume control; `pull` already gives predictable local files. Left as a documented alternative. |
-| Parallel/chunked downloads | deferred | urllib streaming is simple and reliable; add `huggingface-cli` if high-bandwidth resume is needed. |
+| HF sha256 for model files | **implemented** | The tree endpoint (`/api/models/<id>/tree/main`) carries `lfs.oid` — used to verify GGUF downloads. Fails open (proceeds unverified) when the digest can't be established. |
+| Parallel/chunked downloads | **implemented (resume)** | urllib branch now sends a `Range` header to resume from a partial `.part` file; curl branch has `-C -`. |
 | GPU-layer auto-detection for serve | deferred | Backend is detected at install; `--n-gpu-layers` is a runtime knob the user sets (`LLAMA_CPP_N_GPU_LAYERS`). |
 | Uninstall of system-wide installs | removed | By design there are none — the plugin only ever touches `$HERMES_HOME/llama-cpp/`. |
 
@@ -85,3 +86,4 @@ no admin, portable per-user.
 - **Linux CUDA** has no prebuilt asset → source build fallback (correct, but slow).
 - No end-to-end `pull → serve` was exercised on this host (it lacks a runnable
   llama-server); that path is implemented + flag-verified but not live-tested here.
+  An integration test with mocked process management covers the lifecycle logic.

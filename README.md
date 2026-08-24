@@ -123,6 +123,8 @@ Environment variables (override plugin defaults):
 | `LLAMA_CPP_GITHUB_BASE` | `https://github.com` | GitHub download/clone base (for GitHub Enterprise) |
 | `LLAMA_CPP_GITHUB_API_BASE` | `https://api.github.com` | GitHub API base (for GitHub Enterprise) |
 | `LLAMA_CPP_HF_ENDPOINT` | `https://huggingface.co` | Hugging Face endpoint (for mirrors) |
+| `LLAMA_CPP_SMOKE_TIMEOUT` | `8` | Timeout (seconds) for `llama-server --version` smoke test on install. Increase on slow storage. |
+| `LLAMA_CPP_HEALTH_TIMEOUT` | `60` | Timeout (seconds) for `/health` polling when serving. |
 
 > The schema keys (`base_url`, `host`, `port`, `ctx_size`, `n_gpu_layers`,
 > `parallel`, `install_dir`, `backend`, `version`, `models_dir`, `api_key`,
