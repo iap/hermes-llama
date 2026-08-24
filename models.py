@@ -542,8 +542,14 @@ def _find_loaded_server() -> int | None:
 
 
 def _wait_healthy(base: str, timeout: float = 60.0) -> bool:
-    """Poll ``/health`` until the server reports ready (or timeout)."""
+    """Poll ``/health`` until the server reports ready (or timeout).
+
+    Uses exponential backoff: 1s → 2s → 4s → 8s (capped). A local server
+    usually responds within the first few polls, so this avoids wasting
+    CPU on tight sleeps during the (rare) long tail of a slow GPU load.
+    """
     deadline = time.time() + timeout
+    delay = 1.0
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(f"{base}/health", timeout=3) as resp:
@@ -551,7 +557,8 @@ def _wait_healthy(base: str, timeout: float = 60.0) -> bool:
                     return True
         except Exception:  # noqa: BLE001 — best-effort read
             pass
-        time.sleep(1)
+        time.sleep(delay)
+        delay = min(delay * 2, 8.0)
     return False
 
 
@@ -585,6 +592,12 @@ def serve(alias: str) -> str:
             return f"Model '{alias}' is not downloaded yet. Run `/llama pull {alias}` first."
 
     serve_alias = model.get("alias", alias)
+    # Validate the model file exists before launching — a stale registry
+    # entry (file deleted, path moved) would otherwise cause llama-server
+    # to fail with an opaque error.
+    model_path = Path(model["path"])
+    if not model_path.is_file():
+        return f"Model file not found: {model_path}. Run `/llama pull {alias}` to re-download."
     s = _settings()
     # Explicit --alias keeps the /v1/models id clean and stable.
     cmd = [
