@@ -46,5 +46,18 @@ jobs:
       - name: Smoke test install.py (in isolation)
         run: python tests/test_install.py
 
+      # Integration tests exercise the full pull -> serve -> stop lifecycle with
+      # mocked process management. They live in their own file so the stdlib-only
+      # smoke test stays independent; run every discovered module explicitly.
+      - name: Integration tests (lifecycle, mocked)
+        run: |
+          for f in tests/integration/test_*.py; do
+            echo "::group::$f"
+            python "$f"
+            status=$?
+            echo "::endgroup::"
+            [ $status -eq 0 ] || exit 1
+          done
+
       - name: Lint with ruff
         run: ruff check .
