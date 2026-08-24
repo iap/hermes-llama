@@ -1041,6 +1041,97 @@ def test_registry_txn_serializes_concurrent_writers():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_download_curl_branch_no_second_head():
+    """The curl branch must succeed without a second HEAD request.
+
+    This branch was previously untested AND carried its own copy of the
+    Xet-stub defect: it fetched Content-Length via `curl -sI -L`, which returns
+    the redirect-stub size for Xet assets, failing every download. The stub is
+    installed via shutil.which so the test is deterministic; urllib is forced
+    OFF to prove we are really exercising the curl path.
+    """
+    models = _load_models()
+
+    payload = b"curl-branch body " * 200
+
+    tmpdir = tempfile.mkdtemp(prefix="llama-curlbr-")
+    fake_bin = Path(tmpdir) / "bin"
+    fake_bin.mkdir()
+    curl_stub = fake_bin / "curl"
+    # A stand-in curl: records argv, writes a deterministic payload to whatever
+    # follows -o, exits 0. Robust against any flag ordering.
+    curl_stub.write_text(
+        "#!/bin/sh\n"
+        'echo "$@" >> "$CURL_LOG"\n'
+        "prev=\n"
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-o" ]; then printf "%s" "' + payload.decode("latin-1").replace('"', '\\"') + '" > "$a"; fi\n'
+        '  prev=$a\n'
+        "done\n"
+        "exit 0\n",
+        encoding="latin-1",
+    )
+    curl_stub.chmod(0o755)
+    log = Path(tmpdir) / "argv.log"
+
+    saved_which = models.shutil.which
+    saved_env = os.environ.get("CURL_LOG")
+    try:
+        os.environ["CURL_LOG"] = str(log)
+        models.shutil.which = lambda name: str(curl_stub) if name == "curl" else None
+        dest = Path(tmpdir) / "m.gguf"
+
+        models._download_model("https://example.invalid/m.gguf", dest)
+
+        assert dest.is_file() and dest.stat().st_size == len(payload), (
+            dest.stat().st_size if dest.exists() else "dest missing")
+        calls = log.read_text().splitlines()
+        # Exactly one invocation: no separate HEAD round-trip.
+        assert len(calls) == 1, f"expected 1 curl call, got {len(calls)}: {calls}"
+        assert not any("-sI" in c or "--head" in c for c in calls), calls
+    finally:
+        models.shutil.which = saved_which
+        if saved_env is None:
+            os.environ.pop("CURL_LOG", None)
+        else:
+            os.environ["CURL_LOG"] = saved_env
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_download_curl_branch_zero_byte_fails():
+    """A zero-byte curl success must be rejected, not promoted."""
+    models = _load_models()
+    tmpdir = tempfile.mkdtemp(prefix="llama-curlz-")
+    fake_bin = Path(tmpdir) / "bin"
+    fake_bin.mkdir()
+    curl_stub = fake_bin / "curl"
+    curl_stub.write_text(
+        "#!/bin/sh\n"
+        "# create an EMPTY file at whatever follows -o, then exit 0\n"
+        "prev=\n"
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-o" ]; then : > "$a"; fi\n'
+        '  prev=$a\n'
+        "done\n"
+        "exit 0\n"
+    )
+    curl_stub.chmod(0o755)
+    saved_which = models.shutil.which
+    try:
+        models.shutil.which = lambda name: str(curl_stub) if name == "curl" else None
+        dest = Path(tmpdir) / "m.gguf"
+        try:
+            models._download_model("https://example.invalid/m.gguf", dest)
+        except RuntimeError as exc:
+            assert "0 bytes" in str(exc), exc
+        else:
+            raise AssertionError("zero-byte download was accepted")
+        assert not dest.exists(), "empty file promoted to dest"
+    finally:
+        models.shutil.which = saved_which
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

@@ -642,17 +642,14 @@ def _download(url: str, dest: Path) -> None:
             )
             if proc.returncode != 0:
                 raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]} (exit {proc.returncode})")
-            expected = None
-            try:
-                head = subprocess.run([curl, "-sI", "-L", url], capture_output=True, text=True, timeout=20).stdout
-                for line in head.splitlines():
-                    if line.lower().startswith("content-length:"):
-                        expected = int(line.split(":", 1)[1].strip())
-                        break
-            except Exception:
-                pass
-            if expected is not None and tmp.stat().st_size != expected:
-                raise RuntimeError(f"download truncated: expected {expected} bytes, got {tmp.stat().st_size}")
+            # Size sanity only: a non-empty file is accepted here. The previous
+            # version fetched Content-Length via a second HEAD request, which on
+            # Xet-backed assets returns the redirect-stub size (~1 KB) instead of
+            # the real body size, failing every download with a spurious
+            # "download truncated" (the same defect fixed for models.py). Real
+            # integrity is enforced by the caller's checksum when available.
+            if tmp.stat().st_size == 0:
+                raise RuntimeError("download truncated: curl wrote 0 bytes")
             os.replace(tmp, dest)
             return
         with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as out:
@@ -789,10 +786,14 @@ def _build_from_source(backend: str) -> dict:
             return {"ok": False, "method": "source", "detail": f"git clone failed: {proc.stderr.strip()[:300]}"}
     else:
         # Refresh the existing checkout so a rebuild picks up upstream fixes
-        # rather than reusing a stale local master.
+        # rather than reusing a stale local master. Reset to FETCH_HEAD instead
+        # of origin/HEAD: the latter is a local convenience ref that can be
+        # missing (remote never advertised HEAD, manual remote setup) or stale
+        # after a default-branch change, and either failure aborts the build.
         for git_args in (
-            ["git", "fetch", "origin"],
-            ["git", "reset", "--hard", "origin/HEAD"],
+            ["git", "fetch", "origin", "+master:refs/remotes/origin/master"],
+            ["git", "reset", "--hard", "origin/master"],
+            ["git", "clean", "-fdx", "build"],  # stale CMake cache from another commit
         ):
             proc = subprocess.run(git_args, cwd=str(src), capture_output=True, text=True, timeout=600)
             if proc.returncode != 0:

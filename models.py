@@ -383,27 +383,12 @@ def _download_model(url: str, dest: Path, *, expected_sha256: str | None = None)
             )
             if proc.returncode != 0:
                 raise RuntimeError(f"curl download failed: {proc.stderr.strip()[:300]}")
-            expected = None
-            try:
-                head = subprocess.run([curl, "-sI", "-L", url], capture_output=True, text=True, timeout=20).stdout
-                x_linked = None
-                for line in head.splitlines():
-                    if line.lower().startswith("x-linked-size:"):
-                        x_linked = int(line.split(":", 1)[1].strip())
-                        break
-                if x_linked is not None:
-                    expected = x_linked
-                else:
-                    for line in head.splitlines():
-                        if line.lower().startswith("content-length:"):
-                            v = int(line.split(":", 1)[1].strip())
-                            if v > 1024 * 1024:
-                                expected = v
-                            break
-            except Exception:
-                pass
-            if expected is not None and tmp.stat().st_size != expected:
-                raise RuntimeError(f"download truncated: expected {expected} bytes, got {tmp.stat().st_size}")
+            # Size sanity only (non-empty): no second HEAD request here. On
+            # Xet-backed assets a HEAD returns the redirect-stub size (~1 KB),
+            # which previously failed every download with a spurious "download
+            # truncated". Real integrity is enforced by expected_sha256 below.
+            if tmp.stat().st_size == 0:
+                raise RuntimeError("download truncated: curl wrote 0 bytes")
             _verify_sha256(tmp, expected_sha256)
             os.replace(tmp, dest)
             return
