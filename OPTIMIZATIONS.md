@@ -47,12 +47,25 @@ no admin, portable per-user.
    `libllama-server-impl` load failure on macOS (found via live test).
 
 6. **Health-polling on serve** — `serve` waits for `GET /health` to return 200
-   (up to 30 s) and reports "ready" vs "still loading", instead of returning
-   before the model is loaded.
+   (up to 60 s by default, configurable via `LLAMA_CPP_HEALTH_TIMEOUT`) and
+   reports "ready" vs "still loading", instead of returning before the model is
+   loaded.
 
 7. **Stdlib-only, zero runtime deps** — `urllib`, `tarfile`, `zipfile`,
    `subprocess`, `json` only. No pip packages required at runtime, so the plugin
    works everywhere Python runs.
+
+8. **Download integrity** — GGUF pulls are verified against the upstream
+   sha256 (`lfs.oid` from Hugging Face's tree endpoint) before a staged
+   `.part` file is promoted; a mismatched or corrupted payload never lands
+   under its final name. Fails open when upstream exposes no digest.
+
+9. **Hardening (registry + archives)** — model registry writes are serialized
+   through an interprocess lock with PID-unique temp files (concurrent `pull`
+   can no longer lose entries), corrupt registry files are preserved as
+   `models.json.corrupt-<pid>` instead of being overwritten, zip extraction
+   rejects symlink members (parity with the tar branch) and extracts per
+   vetted member rather than via `extractall`.
 
 ## 3. Considered but deferred (with reason)
 
@@ -60,7 +73,6 @@ no admin, portable per-user.
 |---|---|---|
 | Checksum verification of the binary | deferred | Releases publish **no** `.sha256`/checksums assets (verified). Nothing to verify against; would be fake assurance. |
 | `llama-server --hf-repo` native download | deferred | Removes the local registry + resume control; `pull` already gives predictable local files. Left as a documented alternative. |
-| HF sha256 for model files | deferred | `GET /api/models/<id>` returns `lfs: null` for these repos, so no checksum to compare. Prefer `huggingface-cli download` (does its own integrity check) when available. |
 | Parallel/chunked downloads | deferred | urllib streaming is simple and reliable; add `huggingface-cli` if high-bandwidth resume is needed. |
 | GPU-layer auto-detection for serve | deferred | Backend is detected at install; `--n-gpu-layers` is a runtime knob the user sets (`LLAMA_CPP_N_GPU_LAYERS`). |
 | Uninstall of system-wide installs | removed | By design there are none — the plugin only ever touches `$HERMES_HOME/llama-cpp/`. |
