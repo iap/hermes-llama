@@ -185,28 +185,25 @@ def list_models() -> str:
     return "\n".join(lines)
 
 
-def _int_env(name: str, default: int) -> int:
-    """Parse an integer env var defensively (fall back to default on garbage)."""
-    raw = os.environ.get(name, "").strip()
+def _env(name: str, default: str, *, type_: type = str, truthy: frozenset[str] | None = None) -> str | int | bool:
+    """Read and parse an env var with a default.
+
+    ``type_`` controls coercion: ``str`` (default), ``int`` (falls back to
+    *default* on garbage), or ``bool`` (checks against *truthy*, default
+    ``{"1", "true", "yes", "on"}``).
+    """
+    raw = (os.environ.get(name, "") or "").strip()
     if not raw:
         return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _str_env(name: str, default: str) -> str:
-    """Read a string env var, falling back to *default* when unset/blank."""
-    return (os.environ.get(name, "") or "").strip() or default
-
-
-def _bool_env(name: str, default: bool) -> bool:
-    """Parse a boolean env var ("1/true/yes/on" == True), else *default*."""
-    raw = (os.environ.get(name, "") or "").strip().lower()
-    if not raw:
-        return default
-    return raw in ("1", "true", "yes", "on")
+    if type_ is bool:
+        truthy_vals = truthy if truthy is not None else frozenset({"1", "true", "yes", "on"})
+        return raw.lower() in truthy_vals
+    if type_ is int:
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+    return raw
 
 
 def _physical_cores() -> int:
@@ -245,17 +242,17 @@ def _settings() -> dict:
     """Resolve runtime settings: env overrides > defaults."""
     return {
         "host": os.environ.get("LLAMA_CPP_HOST", "127.0.0.1"),
-        "port": _int_env("LLAMA_CPP_PORT", 8080),
-        "ctx_size": _int_env("LLAMA_CPP_CTX_SIZE", 2048),
-        "n_gpu_layers": _int_env("LLAMA_CPP_N_GPU_LAYERS", 0),
-        "parallel": _int_env("LLAMA_CPP_PARALLEL", 1),
+        "port": _env("LLAMA_CPP_PORT", 8080, type_=int),
+        "ctx_size": _env("LLAMA_CPP_CTX_SIZE", 2048, type_=int),
+        "n_gpu_layers": _env("LLAMA_CPP_N_GPU_LAYERS", 0, type_=int),
+        "parallel": _env("LLAMA_CPP_PARALLEL", 1, type_=int),
         # 0 = omit the flag and let llama.cpp pick.
-        "threads": _int_env("LLAMA_CPP_THREADS", _physical_cores()),
+        "threads": _env("LLAMA_CPP_THREADS", _physical_cores(), type_=int),
         # Quantized KV cache is the single biggest RAM lever on small hosts.
-        "cache_type_k": _str_env("LLAMA_CPP_CACHE_TYPE_K", "q8_0"),
-        "cache_type_v": _str_env("LLAMA_CPP_CACHE_TYPE_V", "q8_0"),
+        "cache_type_k": _env("LLAMA_CPP_CACHE_TYPE_K", "q8_0"),
+        "cache_type_v": _env("LLAMA_CPP_CACHE_TYPE_V", "q8_0"),
         # Jinja chat templates are what make tool-calling models usable.
-        "jinja": _bool_env("LLAMA_CPP_JINJA", True),
+        "jinja": _env("LLAMA_CPP_JINJA", True, type_=bool),
     }
 
 
@@ -673,7 +670,7 @@ def serve(alias: str) -> str:
             pass
         return f"llama-server exited immediately (exit {code}). {tail}"
     base = f"http://{s['host']}:{s['port']}"
-    ready = _wait_healthy(base, timeout=float(_int_env("LLAMA_CPP_HEALTH_TIMEOUT", 60)))
+    ready = _wait_healthy(base, timeout=float(_env("LLAMA_CPP_HEALTH_TIMEOUT", 60, type_=int)))
     state = "ready" if ready else "still loading (watch `/llama status`)"
     return (
         f"Started llama-server (pid {proc.pid}) with model '{serve_alias}' on "
