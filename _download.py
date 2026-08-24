@@ -10,6 +10,30 @@ from pathlib import Path
 from typing import Callable
 
 
+def _parse_expected_len(resp, resume_offset: int) -> int | None:
+    """Parse expected download length from response headers."""
+    try:
+        raw = resp.headers.get("X-Linked-Size") if hasattr(resp, "headers") else None
+        if raw:
+            return int(str(raw).strip())
+        raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+        if raw:
+            content_len = int(str(raw).strip())
+            # For a 206 response, Content-Length is the range size,
+            # not the full file size. Add the resume offset.
+            return content_len + resume_offset if resume_offset > 0 else content_len
+    except Exception:
+        pass
+    return None
+
+
+def _stream_response(resp, tmp: Path, resume_offset: int) -> None:
+    """Stream response body to tmp file."""
+    with open(tmp, "ab" if resume_offset > 0 else "wb") as out:
+        shutil.copyfileobj(resp, out, length=1024 * 1024)
+        out.flush()
+
+
 def download_file(
     url: str,
     dest: Path,
@@ -51,25 +75,40 @@ def download_file(
             os.replace(tmp, dest)
             return
         req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp, open(tmp, "wb") as out:
-            if getattr(resp, "status", 200) != 200:
-                raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
-            expected_len = None
-            try:
-                raw = resp.headers.get("X-Linked-Size") if hasattr(resp, "headers") else None
-                if raw:
-                    expected_len = int(str(raw).strip())
-                else:
-                    raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
-                    if raw and int(str(raw).strip()) > 1024 * 1024:
-                        expected_len = int(str(raw).strip())
-            except Exception:
-                pass
-            shutil.copyfileobj(resp, out, length=1024 * 1024)
-            out.flush()
+        # Resume: if a partial download exists, send a Range header to continue
+        # from where we left off. The server must support HTTP 206 (partial
+        # content); if it returns 200 instead, the server ignored Range and we
+        # restart from scratch.
+        resume_offset = 0
+        if tmp.is_file() and tmp.stat().st_size > 0:
+            resume_offset = tmp.stat().st_size
+            req.add_header("Range", f"bytes={resume_offset}-")
+
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) == 416:
+                # Range not satisfiable — file already complete or server
+                # doesn't have the requested range. Restart from scratch.
+                resume_offset = 0
+                tmp.unlink(missing_ok=True)
+                req.headers.pop("Range", None)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    if getattr(resp, "status", 200) != 200:
+                        raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
+                    expected_len = _parse_expected_len(resp, resume_offset)
+                    _stream_response(resp, tmp, resume_offset)
+            else:
+                if getattr(resp, "status", 200) not in (200, 206):
+                    raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
+                # If the server returned 200 when we asked for a Range, it ignored
+                # the header — restart from scratch.
+                if resume_offset > 0 and getattr(resp, "status", 200) == 200:
+                    resume_offset = 0
+                    tmp.unlink(missing_ok=True)
+                expected_len = _parse_expected_len(resp, resume_offset)
+                _stream_response(resp, tmp, resume_offset)
             if expected_len is not None and tmp.stat().st_size != expected_len:
                 raise RuntimeError(
-                    f"download truncated: Content-Length {expected_len}, got {tmp.stat().st_size}"
+                    f"download truncated: expected {expected_len} bytes, got {tmp.stat().st_size}"
                 )
         if verify is not None:
             verify(tmp)
