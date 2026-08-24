@@ -729,6 +729,12 @@ def stop() -> str:
                     pass
     except Exception as exc:
         return f"Failed to stop pid {pid}: {exc}"
+    # Confirm the process is actually gone before unlinking the pid file.
+    # If the kill did not take effect, leave the pid file in place so
+    # _find_loaded_server() still reports the server as running instead of
+    # silently losing track of a live process.
+    if _pid_alive(pid) and _is_llama_server(pid):
+        return f"Failed to stop llama-server (pid {pid}): process still running."
     _server_pid_path().unlink(missing_ok=True)
     return f"Stopped llama-server (pid {pid})."
 
