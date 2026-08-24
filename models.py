@@ -38,7 +38,7 @@ def _hf_base() -> str:
 #   * Qwen2.5 / SmolLM2 — Apache-2.0: permissive, commercial use allowed, and
 #     tool-calling capable (pair with llama-server ``--jinja``).
 # Sizes are the real GGUF byte sizes from the HF tree API, not estimates.
-LIQUIDAI_PRESETS = {
+MODEL_PRESETS = {
     "liquidai": {
         "alias": "liquidai-lfm2-1.2b",
         "repo": "LiquidAI/LFM2-1.2B-GGUF",
@@ -171,7 +171,7 @@ def _registry_txn():
 
 def list_models() -> str:
     lines = ["Presets (not yet downloaded):"]
-    for name, p in LIQUIDAI_PRESETS.items():
+    for name, p in MODEL_PRESETS.items():
         lines.append(
             f"  {name:<16} {p['repo']} · {p['file']} (~{p['size_gb']} GB) — {p['note']}"
         )
@@ -265,7 +265,7 @@ def _resolve_model(spec: str) -> tuple[str, str, str] | None:
     Accepts either a preset key (e.g. ``liquidai``) or a Hugging Face repo id
     (``Org/Repo``), in which case the first ``*.gguf`` sibling is used.
     """
-    preset = LIQUIDAI_PRESETS.get(spec.lower())
+    preset = MODEL_PRESETS.get(spec.lower())
     if preset:
         return preset["repo"], preset["file"], preset["alias"]
     if "/" in spec and not spec.lower().endswith(".gguf"):
@@ -376,7 +376,7 @@ def pull(spec: str, alias: str | None = None) -> str:
     """Download a GGUF model into the plugin models dir and register it."""
     resolved = _resolve_model(spec)
     if resolved is None:
-        return f"Unknown model spec '{spec}'. Use a preset ({', '.join(LIQUIDAI_PRESETS)}) or Org/Repo."
+        return f"Unknown model spec '{spec}'. Use a preset ({', '.join(MODEL_PRESETS)}) or Org/Repo."
     repo, file, default_alias = resolved
     if not file:
         file = _pick_gguf_file(repo)

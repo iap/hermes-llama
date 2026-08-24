@@ -599,7 +599,7 @@ def test_presets_are_wellformed():
     ambiguous).
     """
     models = _load_models()
-    presets = models.LIQUIDAI_PRESETS
+    presets = models.MODEL_PRESETS
     assert presets, "preset catalog is empty"
     aliases = []
     for key, p in presets.items():
