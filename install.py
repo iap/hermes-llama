@@ -478,7 +478,7 @@ def _source_remote_head() -> str | None:
                 etag = json.loads(cache.read_text()).get("etag")
                 if isinstance(etag, str) and etag:
                     req.add_header("If-None-Match", etag)
-        except Exception:
+        except Exception:  # noqa: BLE001 — cache read is best-effort
             pass
         with urllib.request.urlopen(req, timeout=20) as resp:
             if getattr(resp, "status", 200) == 304:
@@ -488,7 +488,7 @@ def _source_remote_head() -> str | None:
                     data["ts"] = time.time()
                     _cache_dir().mkdir(parents=True, exist_ok=True)
                     cache.write_text(json.dumps(data))
-                except Exception:
+                except Exception:  # noqa: BLE001 — cache write is best-effort
                     pass
                 return json.loads(cache.read_text()).get("sha")
             data = json.loads(resp.read().decode())
@@ -621,7 +621,7 @@ def _latest_tag() -> str | None:
                     etag = json.loads(cache.read_text()).get("etag")
                     if isinstance(etag, str) and etag:
                         req.add_header("If-None-Match", etag)
-                except Exception:
+                except Exception:  # noqa: BLE001 — cache read is best-effort
                     pass
             with urllib.request.urlopen(req, timeout=20) as resp:
                 last_resp = resp
@@ -632,7 +632,7 @@ def _latest_tag() -> str | None:
                         data["ts"] = time.time()
                         _cache_dir().mkdir(parents=True, exist_ok=True)
                         cache.write_text(json.dumps(data))
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — cache write is best-effort
                         pass
                     return json.loads(cache.read_text()).get("tag")
                 page = json.loads(resp.read().decode())

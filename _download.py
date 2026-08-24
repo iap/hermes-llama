@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
-import socket
 import subprocess
-import time
 import urllib.request
 from pathlib import Path
 from typing import Callable
@@ -24,32 +22,15 @@ def _parse_expected_len(resp, resume_offset: int) -> int | None:
             # For a 206 response, Content-Length is the range size,
             # not the full file size. Add the resume offset.
             return content_len + resume_offset if resume_offset > 0 else content_len
-    except Exception:
+    except Exception:  # noqa: BLE001 — header parsing is best-effort
         pass
     return None
 
 
 def _stream_response(resp, tmp: Path, resume_offset: int) -> None:
-    """Stream response body to tmp file.
-
-    Uses a socket timeout to prevent hanging indefinitely on a stalled
-    connection. The timeout is reset on each successful read chunk.
-    """
+    """Stream response body to tmp file."""
     with open(tmp, "ab" if resume_offset > 0 else "wb") as out:
-        # Set a socket-level timeout so a stalled connection raises
-        # instead of hanging indefinitely. The timeout is reset on each
-        # successful read chunk.
-        sock = getattr(resp, "fp", None)
-        if sock is not None:
-            sock.settimeout(30)
-        while True:
-            chunk = resp.read(1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-            # Reset the timeout on each successful read.
-            if sock is not None:
-                sock.settimeout(30)
+        shutil.copyfileobj(resp, out, length=1024 * 1024)
         out.flush()
 
 

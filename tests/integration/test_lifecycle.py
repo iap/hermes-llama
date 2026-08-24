@@ -98,6 +98,7 @@ def test_lifecycle_pull_serve_stop():
         models._is_llama_server = lambda pid: pid == mock_state["pid"]
 
         # Patch the kill mechanism to update mock state
+        original_killpg = None
         if sys.platform == "win32":
             # On Windows, stop() uses subprocess.run(["taskkill", ...])
             original_run = models.subprocess.run
@@ -113,7 +114,6 @@ def test_lifecycle_pull_serve_stop():
             models.subprocess.run = mock_run
         else:
             # On POSIX, stop() uses os.killpg()
-            import signal
             original_killpg = models.os.killpg
             def mock_killpg(pid, sig):
                 if pid == mock_state["pid"]:
