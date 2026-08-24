@@ -98,6 +98,25 @@ def _model_dest(repo: str, local_name: str) -> Path:
     return install.models_dir() / repo.replace("/", "__") / local_name
 
 
+def _to_rel_path(path: Path) -> str:
+    """Convert an absolute model path to relative (models_dir) for portable storage."""
+    try:
+        return str(Path(path).relative_to(install.models_dir()))
+    except ValueError:
+        return str(path)  # not under models_dir — store as-is
+
+
+def _from_rel_path(rel_or_abs: str) -> Path:
+    """Resolve a registry path (relative or absolute) to an absolute Path.
+
+    Handles both legacy absolute entries and portable relative ones.
+    """
+    p = Path(rel_or_abs)
+    if p.is_absolute():
+        return p  # legacy absolute entry
+    return install.models_dir() / p
+
+
 def _registry_path() -> Path:
     return install.install_root() / install.REGISTRY_FILE_NAME
 
@@ -410,7 +429,7 @@ def pull(spec: str, alias: str | None = None) -> str:
                         f"Run `/llama pull {spec}` again to re-download."
                     )
             entry = {
-                "repo": repo, "file": local_name, "path": str(dest),
+                "repo": repo, "file": local_name, "path": _to_rel_path(dest),
                 "size_gb": round(sz / 1024**3, 2),
             }
             if expected:
@@ -429,7 +448,7 @@ def pull(spec: str, alias: str | None = None) -> str:
     except Exception as exc:
         return f"Download failed: {exc}"
     size_gb = round(dest.stat().st_size / 1024**3, 2)
-    entry = {"repo": repo, "file": local_name, "path": str(dest), "size_gb": size_gb}
+    entry = {"repo": repo, "file": local_name, "path": _to_rel_path(dest), "size_gb": size_gb}
     if expected:
         entry["sha256"] = expected
     with _registry_txn() as reg:
@@ -592,14 +611,14 @@ def serve(alias: str) -> str:
     # Validate the model file exists before launching — a stale registry
     # entry (file deleted, path moved) would otherwise cause llama-server
     # to fail with an opaque error.
-    model_path = Path(model["path"])
+    model_path = _from_rel_path(model["path"])
     if not model_path.is_file():
         return f"Model file not found: {model_path}. Run `/llama pull {alias}` to re-download."
     s = _settings()
     # Explicit --alias keeps the /v1/models id clean and stable.
     cmd = [
         str(binary),
-        "--model", model["path"],
+        "--model", str(model_path),
         "--alias", serve_alias,
         "--host", s["host"],
         "--port", str(s["port"]),
