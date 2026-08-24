@@ -52,10 +52,6 @@ def _github_api() -> str:
     return f"{_github_api_base()}/repos/{REPO}"
 
 
-# Back-compat aliases; prefer the functions.
-GITHUB_BASE = _github_base()
-GITHUB_API = _github_api()
-
 SERVER_BIN = "llama-server.exe" if sys.platform == "win32" else "llama-server"
 BACKENDS = ("cpu", "cuda", "vulkan", "source")
 
