@@ -894,6 +894,71 @@ def test_download_model_rejects_bad_checksum():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_download_model_resumes_partial():
+    """_download_model resumes from a partial .part file via Range header."""
+    models = _load_models()
+    import urllib.request as _ur
+
+    # The "remaining" bytes that the server should return
+    remaining = b"remaining bytes " * 100
+    full_payload = b"already have " * 50 + remaining
+
+    class _Resp:
+        status = 206  # Partial Content
+        headers = {"Content-Length": str(len(remaining))}
+
+        def __init__(self):
+            self._data = remaining
+            self._sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n=-1):
+            if self._sent:
+                return b""
+            self._sent = True
+            return self._data
+
+    tmpdir = tempfile.mkdtemp(prefix="llama-resume-")
+    saved_urlopen, saved_which = _ur.urlopen, models.shutil.which
+    try:
+        models.shutil.which = lambda name: None
+
+        # Track the Range header sent
+        captured_headers = {}
+
+        def mock_urlopen(req, timeout=3600):
+            captured_headers.update(dict(req.headers))
+            return _Resp()
+
+        _ur.urlopen = mock_urlopen
+        dest = Path(tmpdir) / "model.gguf"
+
+        # Create a partial file to trigger resume
+        partial = dest.with_suffix(dest.suffix + ".part")
+        partial.write_bytes(b"already have " * 50)
+
+        models._download_model("https://example.invalid/m.gguf", dest)
+
+        # Verify Range header was sent
+        assert "Range" in captured_headers, f"Range header not sent: {captured_headers}"
+        assert captured_headers["Range"] == f"bytes={len(b'already have ' * 50)}-", \
+            f"wrong Range: {captured_headers['Range']}"
+
+        # Verify the final file has both parts
+        assert dest.exists(), "dest not created"
+        content = dest.read_bytes()
+        assert content == full_payload, f"content mismatch: got {len(content)} bytes"
+    finally:
+        _ur.urlopen = saved_urlopen
+        models.shutil.which = saved_which
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def test_extract_rejects_zip_symlink():
     """The zip branch refuses symlink members, matching the tar branch.
 
