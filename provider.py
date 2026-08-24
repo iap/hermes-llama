@@ -47,6 +47,11 @@ class LlamaCppProfile(ProviderProfile):
             base_url=_env_base_url(),
             auth_type="api_key",  # key is optional; empty -> no Authorization header
             supports_health_check=True,
+            # /models needs no auth on llama-server: tell the picker to fetch
+            # live models even with an empty key (requires hermes-agent with
+            # ProviderProfile.fetch_models_without_key, else silently ignored
+            # by older cores via the getattr fallback in the picker).
+            fetch_models_without_key=True,
             fallback_models=(),
         )
 
