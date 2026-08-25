@@ -327,7 +327,9 @@ def _expected_sha256(repo: str, remote_file: str) -> str | None:
     and proceed, so a metadata outage never blocks a download.
     """
     try:
-        url = f"{_hf_base()}/api/models/{repo}/tree/main"
+        # recursive=true: GGUFs often live in subdirectories, and the root-only
+        # listing would miss them (a silent "cannot verify" instead of a digest).
+        url = f"{_hf_base()}/api/models/{repo}/tree/main?recursive=true"
         req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             if getattr(resp, "status", 200) != 200:

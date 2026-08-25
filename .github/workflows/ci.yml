@@ -16,12 +16,25 @@ concurrency:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Full Python matrix on Linux (primary); Windows/macOS cover the
+      # platform-specific paths (msvcrt locks, taskkill/CTRL_BREAK shutdown,
+      # ctypes process probes, in-box curl) with the oldest+newest Pythons.
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.13"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+    # bash on every runner so the POSIX-y steps below (find) work on Windows too.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout
@@ -45,6 +58,9 @@ jobs:
       # (provider.py/__init__.py import the Hermes-only `providers` package).
       - name: Smoke test install.py (in isolation)
         run: python tests/test_install.py
+
+      - name: Integration test (pull → serve → stop lifecycle)
+        run: python tests/integration/test_lifecycle.py
 
       - name: Lint with ruff
         run: ruff check .

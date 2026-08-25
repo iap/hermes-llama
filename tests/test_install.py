@@ -855,6 +855,51 @@ def test_expected_sha256_parses_tree_api():
         _ur.urlopen = saved
 
 
+def test_expected_sha256_lists_tree_recursively():
+    """_expected_sha256 must query the tree recursively and match nested paths.
+
+    _pick_gguf_file() selects from the model-detail endpoint's siblings, which
+    DO include subdirectories — so a repo whose GGUF lives in a subdir gets
+    selected, but a root-only tree listing never contains it and the download
+    silently proceeds "unverified" instead of checking the digest.
+    """
+    models = _load_models()
+    import urllib.request as _ur
+
+    seen_urls = []
+
+    class _Resp:
+        status = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            import json as _json
+
+            return _json.dumps(self._payload).encode()
+
+    def _capture(req, timeout=30):
+        seen_urls.append(req.full_url)
+        # Shape of a RECURSIVE listing: nested paths present.
+        return _Resp([{"path": "subdir/m.gguf", "lfs": {"oid": "a" * 64}}])
+
+    saved = _ur.urlopen
+    try:
+        _ur.urlopen = _capture
+        assert models._expected_sha256("Org/Repo", "subdir/m.gguf") == "a" * 64
+        assert len(seen_urls) == 1, seen_urls
+        assert "recursive=true" in seen_urls[0], f"tree query not recursive: {seen_urls[0]}"
+    finally:
+        _ur.urlopen = saved
+
+
 def test_download_model_rejects_bad_checksum():
     """_download_model must NOT promote a .part whose digest is wrong.
 
@@ -1117,6 +1162,58 @@ def test_registry_txn_serializes_concurrent_writers():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _make_curl_stub(fake_bin: Path, payload: bytes, *, log: bool) -> Path:
+    """Install a fake ``curl`` that writes *payload* to whatever follows ``-o``.
+
+    Returns the executable stub path. POSIX keeps the classic sh script; Windows
+    cannot execute a ``#!/bin/sh`` file directly (WinError 193), so it gets a
+    ``curl.bat`` wrapper around a tiny Python copier. The curl branch is the
+    PRIMARY download path on Windows (curl.exe ships in-box), so these tests
+    must run there rather than skip.
+    """
+    if sys.platform != "win32":
+        stub = fake_bin / "curl"
+        script = "#!/bin/sh\n"
+        if log:
+            script += 'if [ -n "$CURL_LOG" ]; then echo "$@" >> "$CURL_LOG"; fi\n'
+        script += (
+            "prev=\n"
+            'for a in "$@"; do\n'
+            '  if [ "$prev" = "-o" ]; then printf "%s" "'
+            + payload.decode("latin-1").replace('"', '\\"')
+            + '" > "$a"; fi\n'
+            "  prev=$a\n"
+            "done\n"
+            "exit 0\n"
+        )
+        stub.write_text(script, encoding="latin-1")
+        stub.chmod(0o755)
+        return stub
+
+    impl = fake_bin / "curl_impl.py"
+    impl.write_text(
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        "log_path = os.environ.get('CURL_LOG')\n"
+        "if log_path:\n"
+        "    with open(log_path, 'a', encoding='utf-8') as fh:\n"
+        "        fh.write(' '.join(args) + '\\n')\n"
+        "payload = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'payload.bin')\n"
+        "prev = None\n"
+        "for a in args:\n"
+        "    if prev == '-o':\n"
+        "        with open(a, 'wb') as out, open(payload, 'rb') as src:\n"
+        "            out.write(src.read())\n"
+        "    prev = a\n"
+        "sys.exit(0)\n",
+        encoding="ascii",
+    )
+    (fake_bin / "payload.bin").write_bytes(payload)
+    bat = fake_bin / "curl.bat"
+    bat.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0curl_impl.py" %*\r\n', encoding="ascii")
+    return bat
+
+
 def test_download_curl_branch_no_second_head():
     """The curl branch must succeed without a second HEAD request.
 
@@ -1133,21 +1230,9 @@ def test_download_curl_branch_no_second_head():
     tmpdir = tempfile.mkdtemp(prefix="llama-curlbr-")
     fake_bin = Path(tmpdir) / "bin"
     fake_bin.mkdir()
-    curl_stub = fake_bin / "curl"
     # A stand-in curl: records argv, writes a deterministic payload to whatever
     # follows -o, exits 0. Robust against any flag ordering.
-    curl_stub.write_text(
-        "#!/bin/sh\n"
-        'echo "$@" >> "$CURL_LOG"\n'
-        "prev=\n"
-        'for a in "$@"; do\n'
-        '  if [ "$prev" = "-o" ]; then printf "%s" "' + payload.decode("latin-1").replace('"', '\\"') + '" > "$a"; fi\n'
-        '  prev=$a\n'
-        "done\n"
-        "exit 0\n",
-        encoding="latin-1",
-    )
-    curl_stub.chmod(0o755)
+    curl_stub = _make_curl_stub(fake_bin, payload, log=True)
     log = Path(tmpdir) / "argv.log"
 
     saved_which = models._download.shutil.which
@@ -1180,18 +1265,7 @@ def test_download_curl_branch_zero_byte_fails():
     tmpdir = tempfile.mkdtemp(prefix="llama-curlz-")
     fake_bin = Path(tmpdir) / "bin"
     fake_bin.mkdir()
-    curl_stub = fake_bin / "curl"
-    curl_stub.write_text(
-        "#!/bin/sh\n"
-        "# create an EMPTY file at whatever follows -o, then exit 0\n"
-        "prev=\n"
-        'for a in "$@"; do\n'
-        '  if [ "$prev" = "-o" ]; then : > "$a"; fi\n'
-        '  prev=$a\n'
-        "done\n"
-        "exit 0\n"
-    )
-    curl_stub.chmod(0o755)
+    curl_stub = _make_curl_stub(fake_bin, b"", log=False)
     saved_which = models._download.shutil.which
     try:
         models._download.shutil.which = lambda name: str(curl_stub) if name == "curl" else None
