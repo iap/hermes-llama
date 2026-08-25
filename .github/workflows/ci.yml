@@ -16,12 +16,25 @@ concurrency:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Full Python matrix on Linux (primary); Windows/macOS cover the
+      # platform-specific paths (msvcrt locks, taskkill/CTRL_BREAK shutdown,
+      # ctypes process probes, in-box curl) with the oldest+newest Pythons.
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.13"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+    # bash on every runner so the POSIX-y steps below (find) work on Windows too.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout
@@ -49,6 +62,7 @@ jobs:
       # Integration tests exercise the full pull -> serve -> stop lifecycle with
       # mocked process management. They live in their own file so the stdlib-only
       # smoke test stays independent; run every discovered module explicitly.
+      # (The bash default above is what makes this POSIX loop work on Windows.)
       - name: Integration tests (lifecycle, mocked)
         run: |
           for f in tests/integration/test_*.py; do
