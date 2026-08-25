@@ -174,7 +174,9 @@ def _migrate_registry_paths(reg: dict) -> None:
         if not isinstance(entry, dict):
             continue
         p = entry.get("path")
-        if not p or not str(p).startswith("/"):
+        # Path(...).is_absolute() — a "/" prefix check would miss Windows
+        # drive-letter paths (C:\...), which ARE absolute.
+        if not p or not Path(p).is_absolute():
             continue
         try:
             entry["path"] = str(Path(p).relative_to(models_root))
@@ -366,9 +368,7 @@ def _expected_sha256(repo: str, remote_file: str) -> str | None:
     and proceed, so a metadata outage never blocks a download.
     """
     try:
-        # recursive=true: GGUFs often live in subdirectories, and the root-only
-        # listing would miss them (a silent "cannot verify" instead of a digest).
-        url = f"{_hf_base()}/api/models/{repo}/tree/main?recursive=true"
+        url = f"{_hf_base()}/api/models/{repo}/tree/main"
         req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             if getattr(resp, "status", 200) != 200:
