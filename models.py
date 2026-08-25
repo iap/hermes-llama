@@ -66,6 +66,15 @@ MODEL_PRESETS = {
         "size_gb": 1.56,
         "note": "Most-downloaded LiquidAI GGUF. LFM licence.",
     },
+    "liquidai-lfm25": {
+        "alias": "liquidai-lfm25-2.6b-instruct",
+        "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
+        "file": "LFM2.5-2.6B-Q4_K_M.gguf",
+        "size_gb": 1.56,
+        "note": "128K-native context, tool-use trained — the only LiquidAI model "
+                "that clears Hermes' 64K agent floor. Run with ctx_size >= 65536. "
+                "LFM licence.",
+    },
     "qwen2.5-1.5b": {
         "alias": "qwen2.5-1.5b-instruct",
         "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
