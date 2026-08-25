@@ -92,7 +92,75 @@ class LlamaCppProfile(ProviderProfile):
             return None
 
 
+# ── Dashboard visibility (config-scoped, plugin-owned) ──────────────────────
+#
+# The dashboard's model list is built from config.yaml — specifically the
+# ``custom_providers`` list (web_server._models_from_custom_endpoint_entry) —
+# NOT from provider profiles. So downloaded models stay invisible there until
+# an entry exists. We keep that entry in sync from here, scoped strictly to
+# our own data:
+#
+#   * we only ever add/update the entry named "Llama CPP" whose base_url is
+#     OUR resolved endpoint (matched by URL, not by name);
+#   * we never touch sibling entries belonging to other plugins or the user;
+#   * models listed are exactly what OUR registry reports as downloaded;
+#   * a failed write is swallowed — dashboard visibility is best-effort and
+#     must never break pull/serve.
+#
+# This survives core config migrations: even if _config_version bumps or
+# core rewrites other sections, it only re-reads whatever custom_providers
+# contains and we reconcile just our own row.
+
+
+def _sync_dashboard_entry() -> None:
+    """Best-effort sync of downloaded models into config.yaml for the dashboard.
+
+    Reads the live registry (source of truth for what is downloaded), then
+    upserts a single ``custom_providers`` entry keyed by our base_url. Sibling
+    entries are left untouched. Any failure is non-fatal.
+    """
+    try:
+        from hermes_cli.config import load_config  # noqa: PLC0415 — optional at import
+        from .models import _load_registry  # noqa: PLC0415 — sibling module
+
+        cfg = load_config()
+        providers = cfg.get("custom_providers")
+        if not isinstance(providers, list):
+            providers = []
+
+        base = _env_base_url().rstrip("/")
+        models = [
+            e["alias"]
+            for e in _load_registry().values()
+            if isinstance(e, dict) and e.get("alias")
+        ]
+
+        ours = None
+        for entry in providers:
+            if isinstance(entry, dict) and str(entry.get("base_url", "")).rstrip("/") == base:
+                ours = entry
+                break
+
+        if ours is None:
+            ours = {"name": "Llama CPP", "base_url": base}
+            providers.append(ours)
+
+        ours["api_mode"] = "chat_completions"
+        ours["model"] = models[0] if models else ""
+        # dict form = per-model metadata; keys become the visible model ids.
+        ours["models"] = {m: {} for m in models} if models else {}
+        ours["discover_models"] = True  # /v1/models is live on our server
+
+        cfg["custom_providers"] = providers
+        from hermes_cli.config import save_config  # noqa: PLC0415
+
+        save_config(cfg)
+    except Exception:  # noqa: BLE001 — visibility is best-effort
+        logger.debug("dashboard entry sync skipped", exc_info=True)
+
+
 def register() -> None:
+
     """(Re)register a freshly-built profile (last-writer-wins in the registry).
 
     A new profile is built on every call so ``base_url`` is read from the current
@@ -100,3 +168,6 @@ def register() -> None:
     ``LLAMA_CPP_BASE_URL`` before this runs) take effect.
     """
     register_provider(LlamaCppProfile())
+    # Keep the dashboard's custom_providers row in sync with downloaded models
+    # (best-effort; scoped to our own entry only).
+    _sync_dashboard_entry()
