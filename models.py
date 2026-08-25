@@ -66,6 +66,17 @@ MODEL_PRESETS = {
         "size_gb": 1.56,
         "note": "Most-downloaded LiquidAI GGUF. LFM licence.",
     },
+    "liquidai-lfm25": {
+        "alias": "liquidai-lfm25-2.6b-instruct",
+        "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
+        "file": "LFM2.5-2.6B-Q4_K_M.gguf",
+        "size_gb": 1.56,
+        "note": "128K-native context, tool-use trained, reasoning model (output "
+                "arrives via reasoning_content first). On 8 GB RAM run at "
+                "ctx_size 32768 (~8 tok/s); 65536 thrashes swap. Below 64K the "
+                "agent floor rejects it — chat/aux use only unless a core "
+                "floor bypass exists. LFM licence.",
+    },
     "qwen2.5-1.5b": {
         "alias": "qwen2.5-1.5b-instruct",
         "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
@@ -143,7 +154,35 @@ def _load_registry() -> dict:
         except Exception:  # noqa: BLE001 — best-effort preservation
             pass
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    _migrate_registry_paths(data)
+    return data
+
+
+def _migrate_registry_paths(reg: dict) -> None:
+    """One-time migration: rewrite absolute model paths as models_dir-relative.
+
+    PR #21 made registry paths portable (relative to models_dir) so a registry
+    copied between hosts resolves against the new host's layout. Registries
+    written by older versions still hold absolute paths; this rewrites them in
+    memory. The caller persists the result on its next save.
+    """
+    models_root = install.models_dir()
+    changed = False
+    for entry in reg.values():
+        if not isinstance(entry, dict):
+            continue
+        p = entry.get("path")
+        if not p or not str(p).startswith("/"):
+            continue
+        try:
+            entry["path"] = str(Path(p).relative_to(models_root))
+            changed = True
+        except ValueError:
+            pass  # outside models_dir — leave absolute
+    if changed:
+        _save_registry(reg)
 
 
 def _save_registry(reg: dict) -> None:

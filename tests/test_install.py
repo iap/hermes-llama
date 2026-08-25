@@ -10,6 +10,7 @@ module and exercise only its pure, deterministic helpers.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import sys
@@ -1279,6 +1280,46 @@ def test_download_curl_branch_zero_byte_fails():
         assert not dest.exists(), "empty file promoted to dest"
     finally:
         models._download.shutil.which = saved_which
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_registry_absolute_paths_migrate_to_relative():
+    """Legacy absolute registry paths are rewritten relative to models_dir.
+
+    PR #21 made new entries portable; this migrates registries written by
+    older versions so they resolve on any host. Paths outside models_dir
+    must stay absolute (they were never ours to relocate).
+    """
+    models = _load_models()
+    tmpdir = tempfile.mkdtemp(prefix="llama-mig-")
+    saved = os.environ.get("LLAMA_CPP_INSTALL_DIR")
+    try:
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = tmpdir
+        models_dir = Path(tmpdir) / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+
+        inside_abs = str(models_dir / "Org__Repo" / "m.gguf")
+        outside_abs = "/opt/other/place/m.gguf"
+        reg = {
+            "inside": {"repo": "O/R", "file": "m.gguf", "path": inside_abs, "size_gb": 1.0},
+            "outside": {"repo": "X/Y", "file": "n.gguf", "path": outside_abs, "size_gb": 2.0},
+        }
+        path = models._registry_path()
+        path.write_text(json.dumps(reg), encoding="utf-8")
+
+        loaded = models._load_registry()
+        # Inside path migrated to relative; outside path untouched.
+        assert loaded["inside"]["path"] == "Org__Repo/m.gguf", loaded["inside"]
+        assert loaded["outside"]["path"] == outside_abs
+
+        # Relative paths round-trip through _from_rel_path to the right place.
+        resolved = models._from_rel_path(loaded["inside"]["path"])
+        assert resolved == Path(inside_abs)
+    finally:
+        if saved is None:
+            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+        else:
+            os.environ["LLAMA_CPP_INSTALL_DIR"] = saved
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
