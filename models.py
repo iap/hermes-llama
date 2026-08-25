@@ -71,9 +71,11 @@ MODEL_PRESETS = {
         "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
         "file": "LFM2.5-2.6B-Q4_K_M.gguf",
         "size_gb": 1.56,
-        "note": "128K-native context, tool-use trained — the only LiquidAI model "
-                "that clears Hermes' 64K agent floor. Run with ctx_size >= 65536. "
-                "LFM licence.",
+        "note": "128K-native context, tool-use trained, reasoning model (output "
+                "arrives via reasoning_content first). On 8 GB RAM run at "
+                "ctx_size 32768 (~8 tok/s); 65536 thrashes swap. Below 64K the "
+                "agent floor rejects it — chat/aux use only unless a core "
+                "floor bypass exists. LFM licence.",
     },
     "qwen2.5-1.5b": {
         "alias": "qwen2.5-1.5b-instruct",
