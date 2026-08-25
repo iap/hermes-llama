@@ -169,7 +169,6 @@ def _migrate_registry_paths(reg: dict) -> None:
     memory. The caller persists the result on its next save.
     """
     models_root = install.models_dir()
-    changed = False
     for entry in reg.values():
         if not isinstance(entry, dict):
             continue
@@ -181,11 +180,12 @@ def _migrate_registry_paths(reg: dict) -> None:
             continue
         try:
             entry["path"] = Path(p).relative_to(models_root).as_posix()
-            changed = True
         except ValueError:
             pass  # outside models_dir — leave absolute
-    if changed:
-        _save_registry(reg)
+    # NOTE: no persist here — _load_registry is called from lock-free
+    # read paths (list_models), and writing during a read can race a
+    # concurrent pull's locked transaction (lost update). The migrated
+    # shape is used in-memory; the next real save persists it.
 
 
 def _save_registry(reg: dict) -> None:
@@ -372,28 +372,55 @@ def _expected_sha256(repo: str, remote_file: str) -> str | None:
         # recursive=true: GGUFs often live in subdirectories, and the root-only
         # listing would miss them (a silent "cannot verify" instead of a digest).
         url = f"{_hf_base()}/api/models/{repo}/tree/main?recursive=true"
-        req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if getattr(resp, "status", 200) != 200:
+        # The endpoint paginates (default page ~1000): follow cursor/Link until
+        # the target file is found or pages are exhausted, so large repos never
+        # silently fall through to "unverified".
+        for _page in range(20):  # hard cap; 20 * 1000 entries is far beyond any GGUF repo
+            req = urllib.request.Request(url, headers={"User-Agent": "hermes-llama"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if getattr(resp, "status", 200) != 200:
+                    return None
+                data = json.loads(resp.read().decode())
+                link = resp.headers.get("Link") or ""
+            # Response shape: bare list (current API) or {"entries":[...],
+            # "cursor":"..."} (defensive — newer/other deployments).
+            if isinstance(data, dict):
+                entries = data.get("entries")
+                next_cursor = data.get("cursor")
+            else:
+                entries = data
+                next_cursor = None
+            if not isinstance(entries, list):
                 return None
-            entries = json.loads(resp.read().decode())
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("path") != remote_file:
+                    continue
+                lfs = entry.get("lfs")
+                if isinstance(lfs, dict):
+                    oid = lfs.get("oid")
+                    # HF returns a bare hex digest; some mirrors use the
+                    # "sha256:<hex>" form.
+                    if isinstance(oid, str):
+                        oid = oid.split(":")[-1].strip().lower()
+                        if len(oid) == 64 and all(
+                            c in "0123456789abcdef" for c in oid
+                        ):
+                            return oid
+                return None
+            # Follow pagination: Link header rel="next", or an embedded cursor.
+            import re as _re
+
+            m = _re.search(r'<([^>]+)>;\s*rel="next"', link)
+            if m:
+                url = m.group(1)
+            elif isinstance(data, dict) and next_cursor:
+                sep = "&" if "?" in url else "?"
+                url = f"{url}{sep}cursor={next_cursor}"
+            else:
+                return None
+        return None  # page cap exhausted without finding the file
     except Exception:  # noqa: BLE001 — verification is best-effort by design
         return None
-    if not isinstance(entries, list):
-        return None
-    for entry in entries:
-        if not isinstance(entry, dict) or entry.get("path") != remote_file:
-            continue
-        lfs = entry.get("lfs")
-        if isinstance(lfs, dict):
-            oid = lfs.get("oid")
-            # HF returns a bare hex digest; some mirrors use the "sha256:<hex>" form.
-            if isinstance(oid, str):
-                oid = oid.split(":")[-1].strip().lower()
-                if len(oid) == 64 and all(c in "0123456789abcdef" for c in oid):
-                    return oid
-        return None
-    return None
 
 
 def _file_sha256(path: Path) -> str:
