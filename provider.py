@@ -120,20 +120,49 @@ def _sync_dashboard_entry() -> None:
     entries are left untouched. Any failure is non-fatal.
     """
     try:
-        from hermes_cli.config import load_config  # noqa: PLC0415 — optional at import
-        from .models import _load_registry  # noqa: PLC0415 — sibling module
+        from hermes_cli.config import load_config, save_config  # noqa: PLC0415
+        import json
+        from pathlib import Path
+
+        # Resolve the registry file directly from the environment rather than
+        # importing sibling modules — PluginManager can load provider.py and
+        # models.py under fresh per-call module namespaces, so a relative import
+        # here may bind to an empty instance. Reading the JSON on disk is
+        # robust to any module-wiring order and has no dependency on import
+        # mechanics.
+        root = os.environ.get("LLAMA_CPP_INSTALL_DIR", "").strip()
+        if not root:
+            # install_root() default when env is unset
+            root = str(
+                Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
+                / "llama-cpp"
+            )
+        reg_path = Path(root) / "models.json"
+        if reg_path.is_file():
+            reg = json.loads(reg_path.read_text(encoding="utf-8"))
+            if isinstance(reg, dict):
+                # Each registry row may or may not carry an "alias" field.
+                # Prefer the explicit alias, then the preset-style key, then
+                # a human form of the repo id (Org/Repo → "Repo").
+                models = []
+                for key, e in reg.items():
+                    if not isinstance(e, dict):
+                        continue
+                    alias = e.get("alias") or key
+                    if alias:
+                        models.append(alias)
+            else:
+                models = []
+        else:
+            models = []
 
         cfg = load_config()
+
         providers = cfg.get("custom_providers")
         if not isinstance(providers, list):
             providers = []
 
         base = _env_base_url().rstrip("/")
-        models = [
-            e["alias"]
-            for e in _load_registry().values()
-            if isinstance(e, dict) and e.get("alias")
-        ]
 
         ours = None
         for entry in providers:
@@ -152,8 +181,6 @@ def _sync_dashboard_entry() -> None:
         ours["discover_models"] = True  # /v1/models is live on our server
 
         cfg["custom_providers"] = providers
-        from hermes_cli.config import save_config  # noqa: PLC0415
-
         save_config(cfg)
     except Exception:  # noqa: BLE001 — visibility is best-effort
         logger.debug("dashboard entry sync skipped", exc_info=True)
