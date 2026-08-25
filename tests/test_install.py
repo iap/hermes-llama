@@ -799,6 +799,7 @@ def test_expected_sha256_parses_tree_api():
 
     class _Resp:
         status = 200
+        headers = {}  # no Link header -> pagination loop ends after page 1
 
         def __init__(self, payload):
             self._payload = payload
@@ -871,6 +872,7 @@ def test_expected_sha256_lists_tree_recursively():
 
     class _Resp:
         status = 200
+        headers = {}  # no Link header -> pagination loop ends after page 1
 
         def __init__(self, payload):
             self._payload = payload
@@ -897,6 +899,59 @@ def test_expected_sha256_lists_tree_recursively():
         assert models._expected_sha256("Org/Repo", "subdir/m.gguf") == "a" * 64
         assert len(seen_urls) == 1, seen_urls
         assert "recursive=true" in seen_urls[0], f"tree query not recursive: {seen_urls[0]}"
+    finally:
+        _ur.urlopen = saved
+
+
+def test_expected_sha256_follows_pagination():
+    """_expected_sha256 follows Link rel="next" pages to find the target.
+
+    HF paginates the tree endpoint (~1000/page). A repo large enough to span
+    pages must still resolve the digest for a file on page 2+ — silently
+    returning None would re-open the "unverified download" hole.
+    """
+    models = _load_models()
+    import urllib.request as _ur
+
+    seen_urls = []
+
+    class _Resp:
+        status = 200
+
+        def __init__(self, payload, link):
+            self._payload = payload
+            self.headers = {"Link": link} if link else {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            import json as _json
+
+            return _json.dumps(self._payload).encode()
+
+    page1 = [{"path": f"f{i}.gguf", "lfs": {"oid": "b" * 64}} for i in range(3)]
+    page2 = [{"path": "target.gguf", "lfs": {"oid": "a" * 64}}]
+    next_url = ("https://huggingface.co/api/models/Org/Repo/tree/main"
+                "?recursive=true&cursor=XYZ")
+
+    def _capture(req, timeout=30):
+        seen_urls.append(req.full_url)
+        if len(seen_urls) == 1:
+            return _Resp(page1,
+                         f'<{next_url}>; rel="next"')
+        return _Resp(page2, "")
+
+    saved = _ur.urlopen
+    try:
+        _ur.urlopen = _capture
+        got = models._expected_sha256("Org/Repo", "target.gguf")
+        assert got == "a" * 64, got
+        assert len(seen_urls) == 2, seen_urls
+        assert "cursor=XYZ" in seen_urls[1], seen_urls[1]
     finally:
         _ur.urlopen = saved
 
@@ -1314,9 +1369,24 @@ def test_registry_absolute_paths_migrate_to_relative():
         path.write_text(json.dumps(reg), encoding="utf-8")
 
         loaded = models._load_registry()
-        # Inside path migrated to relative; outside path untouched.
+        # Inside path migrated in MEMORY; outside path untouched.
         assert loaded["inside"]["path"] == "Org__Repo/m.gguf", loaded["inside"]
         assert loaded["outside"]["path"] == outside_abs
+
+        # F3: _load_registry must NOT persist mid-read (lock-free readers would
+        # race a concurrent pull's locked transaction). The file on disk still
+        # holds the original absolute path until a real write happens.
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert on_disk["inside"]["path"] == inside_abs, (
+            "_load_registry must not write during read", on_disk)
+
+        # The next real write (locked txn) persists the migrated shape.
+        with models._registry_txn() as reg:
+            reg["_touch"] = {"repo": "A/B", "file": "c.gguf",
+                             "path": "A__B/c.gguf", "size_gb": 0.0}
+        on_disk2 = json.loads(path.read_text(encoding="utf-8"))
+        assert on_disk2["inside"]["path"] == "Org__Repo/m.gguf", on_disk2
+        del on_disk2["_touch"]
 
         # Relative paths round-trip through _from_rel_path to the right place.
         resolved = models._from_rel_path(loaded["inside"]["path"])
