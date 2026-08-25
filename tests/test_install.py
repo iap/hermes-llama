@@ -1299,7 +1299,13 @@ def test_registry_absolute_paths_migrate_to_relative():
         models_dir.mkdir(parents=True, exist_ok=True)
 
         inside_abs = str(models_dir / "Org__Repo" / "m.gguf")
-        outside_abs = "/opt/other/place/m.gguf"
+        # An absolute path OUTSIDE models_dir. Build it from the actual root
+        # drive so the assertion holds on every platform (a hardcoded "/opt/.."
+        # is not absolute on Windows, and "C:\..." is not absolute on POSIX).
+        drive = os.path.splitdrive(str(tmpdir))[0]
+        outside_abs = f"{drive}\\opt_other\\m.gguf" if drive else "/opt/other/place/m.gguf"
+        if not os.path.isabs(outside_abs):
+            outside_abs = "/opt/other/place/m.gguf"
         reg = {
             "inside": {"repo": "O/R", "file": "m.gguf", "path": inside_abs, "size_gb": 1.0},
             "outside": {"repo": "X/Y", "file": "n.gguf", "path": outside_abs, "size_gb": 2.0},

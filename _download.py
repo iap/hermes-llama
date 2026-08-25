@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -58,10 +59,16 @@ def download_file(
     curl = shutil.which("curl")
     try:
         if curl:
+            argv = [curl, "-L", "--fail", "--retry", "3", "--retry-delay", "2",
+                    "--retry-all-errors", "-C", "-",
+                    "-A", "hermes-llama", "-o", str(tmp), url]
+            # .bat/.cmd shims cannot be exec'd directly by CreateProcess on
+            # Windows — they need a cmd.exe wrapper (same as typing `curl` in
+            # a shell). Real-world curl.bat shims make this path real.
+            if sys.platform == "win32" and curl.lower().endswith((".bat", ".cmd")):
+                argv = ["cmd", "/c", *argv]
             proc = subprocess.run(
-                [curl, "-L", "--fail", "--retry", "3", "--retry-delay", "2",
-                 "--retry-all-errors", "-C", "-",
-                 "-A", "hermes-llama", "-o", str(tmp), url],
+                argv,
                 capture_output=True, text=True, timeout=timeout,
             )
             if proc.returncode != 0:
