@@ -180,6 +180,34 @@ def _sync_dashboard_entry() -> None:
         ours["models"] = {m: {} for m in models} if models else {}
         ours["discover_models"] = True  # /v1/models is live on our server
 
+        # The dashboard reads endpoints from cfg["providers"] (a dict keyed by
+        # id), NOT from custom_providers — mirror our entry there too so the
+        # "switch model" list sees it. Scoped the same way: URL-matched, ours
+        # only, siblings untouched.
+        pmap = cfg.get("providers")
+        if not isinstance(pmap, dict):
+            pmap = {}
+        prow = None
+        for pid, row in pmap.items():
+            if isinstance(row, dict) and str(row.get("base_url", "")).rstrip("/") == base:
+                prow = row
+                pid_ours = pid
+                break
+        if prow is None:
+            pid_ours = "llama-cpp"
+            prow = {"name": "Llama CPP"}
+            pmap[pid_ours] = prow
+        prow.update({
+            "name": "Llama CPP",
+            "base_url": base,
+            "transport": "openai_chat",
+            "api_mode": "chat_completions",
+            "model": models[0] if models else "",
+            "models": models,
+            "discover_models": True,
+        })
+        cfg["providers"] = pmap
+
         cfg["custom_providers"] = providers
         save_config(cfg)
     except Exception:  # noqa: BLE001 — visibility is best-effort
