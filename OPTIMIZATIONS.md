@@ -87,3 +87,10 @@ no admin, portable per-user.
 - No end-to-end `pull → serve` was exercised on this host (it lacks a runnable
   llama-server); that path is implemented + flag-verified but not live-tested here.
   An integration test with mocked process management covers the lifecycle logic.
+- **Context-window floor vs RAM (measured live, 8 GB host):** Hermes Agent
+  refuses main models below 64 K context; the window the agent sees is the
+  server's `--ctx-size` (plugin default 2048). LFM2.5-2.6B at 65536 thrashes
+  swap (~0.06 tok/s — unusable); at 32768 it runs ~8 tok/s. Net: on this class
+  of hardware the Qwen/LFM presets are chat/aux-tier; only a ≥64 K-capable
+  model with a modest footprint can be the agent's main model. Documented in
+  README ("Context window vs the Hermes agent floor").
