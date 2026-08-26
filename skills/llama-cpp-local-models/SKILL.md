@@ -43,5 +43,14 @@ How to run local GGUF models through the `hermes-llama` plugin and the
 - Port conflict → set `LLAMA_CPP_PORT` (and `LLAMA_CPP_HOST`).
 - Out of memory → use a smaller quant (Q4_K_M) or smaller model (350M/1.2B),
   and lower `LLAMA_CPP_CTX_SIZE`.
+- "context window … below the minimum 64,000" → the server's `--ctx-size` is
+  below Hermes' agent floor. Raise it via plugin settings
+  (`plugins.entries.hermes-llama.settings.ctx_size`, e.g. 32768) and restart.
+  RAM, not the model's training max, is usually what limits you: on 8 GB run
+  ~32768 for 1.5–2.6 B models; 65536 thrashes swap.
+- Empty-looking reply → LFM2.5-class reasoning models emit `reasoning_content`
+  before `content`; raise `max_tokens` (≥512) or check the reasoning field.
+- Per-model context overrides → `model_overrides.<provider>.<model>.context_window`
+  in config.yaml should match the value you actually serve.
 - GPU offload → set `LLAMA_CPP_N_GPU_LAYERS` (0 = CPU-only; on Apple Silicon or
   CUDA, a positive number offloads layers).

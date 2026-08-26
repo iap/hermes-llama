@@ -84,6 +84,7 @@ not set a meaningful exit status yet; scripts should parse output, not `$?`.
 | `liquidai-350m` | `LiquidAI/LFM2-350M-GGUF` · `LFM2-350M-Q4_K_M.gguf` | 0.21 GB | LFM v1.0 | Ultra-light edge model |
 | `liquidai-2.6b` | `LiquidAI/LFM2-2.6B-GGUF` · `LFM2-2.6B-Q4_K_M.gguf` | 1.46 GB | LFM v1.0 | Stronger, slower on a 2-core CPU |
 | `liquidai-2.5` | `LiquidAI/LFM2.5-2.6B-GGUF` · `LFM2.5-2.6B-Q4_K_M.gguf` | 1.56 GB | LFM v1.0 | Most-downloaded LiquidAI GGUF |
+| `liquidai-lfm25` | `LiquidAI/LFM2.5-2.6B-GGUF` · `LFM2.5-2.6B-Q4_K_M.gguf` | 1.56 GB | LFM v1.0 | **128K-native context, tool-use trained** — the only preset that can clear Hermes' agent floor (see context note below) |
 | `qwen2.5-1.5b` | `Qwen/Qwen2.5-1.5B-Instruct-GGUF` · `qwen2.5-1.5b-instruct-q4_k_m.gguf` | 1.04 GB | Apache-2.0 | Permissive general instruct; tool-calling via `--jinja` |
 | `qwen2.5-coder-1.5b` | `Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF` · `qwen2.5-coder-1.5b-instruct-q4_k_m.gguf` | 1.04 GB | Apache-2.0 | Permissive code-focused instruct |
 | `smollm2-1.7b` | `bartowski/SmolLM2-1.7B-Instruct-GGUF` · `SmolLM2-1.7B-Instruct-Q4_K_M.gguf` | 0.98 GB | Apache-2.0 | Smallest permissive option; chat-oriented |
@@ -98,6 +99,26 @@ not set a meaningful exit status yet; scripts should parse output, not `$?`.
 > chat template and enables OpenAI-style `tools` / `tool_calls`. At the 1.5B
 > scale, `tool_choice: "required"` is far more reliable than `"auto"` — a small
 > model given `"auto"` will often answer in prose instead of emitting a call.
+
+> **Context window vs the Hermes agent floor — read before switching models.**
+> Hermes Agent refuses any main-model whose context window is below
+> **64,000 tokens**, and the window it sees is the server's *allocated*
+> `--ctx-size` (default **2048**), not the model's training maximum:
+>
+> - The dashboard/agent error "context window of 2,048 … below the minimum
+>   64,000" means `LLAMA_CPP_CTX_SIZE` is too low, **not** that the model is
+>   too small.
+> - Raise it via plugin settings: `hermes config set`
+>   `plugins.entries.hermes-llama.settings.ctx_size 32768` (then restart the
+>   server). RAM is the limit — on an 8 GB host, 32768 with q8_0 KV runs a
+>   1.5–2.6 B model at ~8 tok/s; 65536 thrashes swap and drops to ~0.06 tok/s.
+> - True ceilings differ per model: Qwen2.5-1.5B GGUFs cap at 32 K,
+>   SmolLM2 at 8 K, LFM2.5 at 128 K (32 K practical here).
+> - Per-model overrides live in `model_overrides.<provider>.<model>.context_window`
+>   in config.yaml; set them to the value you actually run so the agent's
+>   planner doesn't overfill the window.
+> - **LFM2.5 is a reasoning model**: short replies land in
+>   `reasoning_content` first — a small `max_tokens` looks like an empty answer.
 
 ## Configuration
 
