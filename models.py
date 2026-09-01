@@ -70,6 +70,13 @@ MODEL_PRESETS = {
                 "agent floor rejects it — chat/aux use only unless a core "
                 "floor bypass exists. LFM licence.",
     },
+    "liquidai-2.5": {
+        "alias": "liquidai-lfm2.5-2.6b",
+        "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
+        "file": "LFM2.5-2.6B-Q4_K_M.gguf",
+        "size_gb": 1.56,
+        "note": "Deprecated alias for liquidai-lfm25. LFM licence.",
+    },
     "qwen2.5-1.5b": {
         "alias": "qwen2.5-1.5b-instruct",
         "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",

@@ -83,7 +83,7 @@ not set a meaningful exit status yet; scripts should parse output, not `$?`.
 | `liquidai` | `LiquidAI/LFM2-1.2B-GGUF` · `LFM2-1.2B-Q4_K_M.gguf` | 0.68 GB | LFM v1.0 | **Default** — best fit for 8 GB RAM, CPU-only |
 | `liquidai-350m` | `LiquidAI/LFM2-350M-GGUF` · `LFM2-350M-Q4_K_M.gguf` | 0.21 GB | LFM v1.0 | Ultra-light edge model |
 | `liquidai-2.6b` | `LiquidAI/LFM2-2.6B-GGUF` · `LFM2-2.6B-Q4_K_M.gguf` | 1.46 GB | LFM v1.0 | Stronger, slower on a 2-core CPU |
-|| `liquidai-lfm25` | `LiquidAI/LFM2.5-2.6B-GGUF` · `LFM2.5-2.6B-Q4_K_M.gguf` | 1.56 GB | LFM v1.0 | **128K-native context, tool-use trained** — the only preset that can clear Hermes' agent floor (see context note below) |
+| `liquidai-lfm25` | `LiquidAI/LFM2.5-2.6B-GGUF` · `LFM2.5-2.6B-Q4_K_M.gguf` | 1.56 GB | LFM v1.0 | **128K-native context, tool-use trained** — the only preset that can clear Hermes' agent floor (see context note below) |
 | `qwen2.5-1.5b` | `Qwen/Qwen2.5-1.5B-Instruct-GGUF` · `qwen2.5-1.5b-instruct-q4_k_m.gguf` | 1.04 GB | Apache-2.0 | Permissive general instruct; tool-calling via `--jinja` |
 | `qwen2.5-coder-1.5b` | `Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF` · `qwen2.5-coder-1.5b-instruct-q4_k_m.gguf` | 1.04 GB | Apache-2.0 | Permissive code-focused instruct |
 | `smollm2-1.7b` | `bartowski/SmolLM2-1.7B-Instruct-GGUF` · `SmolLM2-1.7B-Instruct-Q4_K_M.gguf` | 0.98 GB | Apache-2.0 | Smallest permissive option; chat-oriented |
