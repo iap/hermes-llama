@@ -59,13 +59,6 @@ MODEL_PRESETS = {
         "size_gb": 1.46,
         "note": "Stronger, slower on 2-core CPU. LFM licence.",
     },
-    "liquidai-2.5": {
-        "alias": "liquidai-lfm2.5-2.6b",
-        "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
-        "file": "LFM2.5-2.6B-Q4_K_M.gguf",
-        "size_gb": 1.56,
-        "note": "Most-downloaded LiquidAI GGUF. LFM licence.",
-    },
     "liquidai-lfm25": {
         "alias": "liquidai-lfm25-2.6b-instruct",
         "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
