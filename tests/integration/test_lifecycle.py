@@ -43,69 +43,66 @@ def _load_models():
     return models_mod
 
 
+def _make_mock(models, tmpdir):
+    """Set up mock binary, process, and patches for a lifecycle test."""
+    mock_bin = tmpdir / "bin" / "llama-server"
+    mock_bin.parent.mkdir(parents=True, exist_ok=True)
+    mock_bin.write_text("#!/bin/sh\necho mock\n")
+
+    mock_state = {"alive": True, "pid": 99999}
+
+    models.install.find_binary = lambda: mock_bin
+    models._pick_gguf_file = lambda repo: "test.gguf"
+    models._wait_healthy = lambda base, timeout=60: True
+
+    class MockProc:
+        pid = mock_state["pid"]
+        def __init__(self, *args, **kwargs):
+            pass
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="llama-server", timeout=timeout or 1)
+
+    original_popen = models.subprocess.Popen
+    models.subprocess.Popen = MockProc
+
+    original_pid_alive = models._pid_alive
+    models._pid_alive = lambda pid: mock_state["alive"] if pid == mock_state["pid"] else False
+
+    original_is_llama = models._is_llama_server
+    models._is_llama_server = lambda pid: pid == mock_state["pid"]
+
+    def restore():
+        models.subprocess.Popen = original_popen
+        models._pid_alive = original_pid_alive
+        models._is_llama_server = original_is_llama
+
+    return mock_state, restore
+
+
 def test_lifecycle_pull_serve_stop():
     """Full lifecycle: pull a model, serve it, verify running, stop it."""
     models = _load_models()
     tmpdir = Path(tempfile.mkdtemp(prefix="llama-lifecycle-"))
     try:
-        # Override install dir to our temp dir
         os.environ["LLAMA_CPP_INSTALL_DIR"] = str(tmpdir)
         os.environ["LLAMA_CPP_MODELS_DIR"] = str(tmpdir / "models")
-        os.environ["LLAMA_CPP_PORT"] = "18080"  # non-default port to avoid conflicts
+        os.environ["LLAMA_CPP_PORT"] = "18080"
 
-        # Create a fake GGUF file in the expected location
         models_dir = tmpdir / "models"
         models_dir.mkdir(parents=True, exist_ok=True)
-        # _model_dest creates: models_dir / repo.replace("/", "__") / local_name
         repo_dir = models_dir / "Org__Repo"
         repo_dir.mkdir(parents=True, exist_ok=True)
         gguf_file = repo_dir / "test.gguf"
-        gguf_file.write_bytes(b"mock gguf content " * 60000)  # > 1 MiB to avoid re-download guard
+        gguf_file.write_bytes(b"mock gguf content " * 60000)
 
-        # Create a mock binary
-        mock_bin = tmpdir / "bin" / "llama-server"
-        mock_bin.parent.mkdir(parents=True, exist_ok=True)
-        mock_bin.write_text("#!/bin/sh\necho mock\n")
+        mock_state, restore = _make_mock(models, tmpdir)
 
-        # Track mock process state
-        mock_state = {"alive": True, "pid": 99999}
-
-        # Patch find_binary to return our mock
-        models.install.find_binary = lambda: mock_bin
-        # Patch _pick_gguf_file to return our test file
-        models._pick_gguf_file = lambda repo: "test.gguf"
-        # Patch _wait_healthy to immediately return True (server is "ready")
-        models._wait_healthy = lambda base, timeout=60: True
-
-        # Patch subprocess.Popen to return a mock process
-        class MockProc:
-            pid = mock_state["pid"]
-            def __init__(self, *args, **kwargs):
-                pass
-            def wait(self, timeout=None):
-                # Simulate a running server — always timeout
-                raise subprocess.TimeoutExpired(cmd="llama-server", timeout=timeout or 1)
-
-        original_popen = models.subprocess.Popen
-        models.subprocess.Popen = MockProc
-
-        # Patch _pid_alive to track mock state
-        original_pid_alive = models._pid_alive
-        models._pid_alive = lambda pid: mock_state["alive"] if pid == mock_state["pid"] else False
-
-        # Patch _is_llama_server to always return True for our mock
-        original_is_llama = models._is_llama_server
-        models._is_llama_server = lambda pid: pid == mock_state["pid"]
-
-        # Patch the kill mechanism to update mock state
+        original_run = models.subprocess.run
         original_killpg = None
         if sys.platform == "win32":
-            # On Windows, stop() uses subprocess.run(["taskkill", ...])
-            original_run = models.subprocess.run
             def mock_run(cmd, **kwargs):
                 if "taskkill" in str(cmd):
                     mock_state["alive"] = False
-                # Return a mock result
                 class MockResult:
                     returncode = 0
                     stdout = ""
@@ -113,7 +110,6 @@ def test_lifecycle_pull_serve_stop():
                 return MockResult()
             models.subprocess.run = mock_run
         else:
-            # On POSIX, stop() uses os.killpg()
             original_killpg = models.os.killpg
             def mock_killpg(pid, sig):
                 if pid == mock_state["pid"]:
@@ -121,37 +117,141 @@ def test_lifecycle_pull_serve_stop():
             models.os.killpg = mock_killpg
 
         try:
-            # Pull the model (will find the existing file and register it)
             result = models.pull("Org/Repo", "test-model")
             assert "registered" in result or "Downloaded" in result or "Already present" in result, result
 
-            # Verify registry has the entry
             reg = models._load_registry()
             assert "test-model" in reg, f"model not in registry: {reg}"
 
-            # Serve the model
             result = models.serve("test-model")
             assert "Started" in result or "ready" in result, result
 
-            # Verify server is running
             status = models.status()
             assert "yes" in status, f"server not running: {status}"
 
-            # Stop the server (kill will set mock_state["alive"] = False)
             result = models.stop()
             assert "Stopped" in result, f"stop failed: {result}"
 
-            # Verify server is stopped
             status = models.status()
             assert "no" in status, f"server still running: {status}"
         finally:
-            models.subprocess.Popen = original_popen
-            models._pid_alive = original_pid_alive
-            models._is_llama_server = original_is_llama
+            restore()
             if sys.platform == "win32":
                 models.subprocess.run = original_run
             else:
                 models.os.killpg = original_killpg
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_serve_preset_by_key():
+    """Serving a preset by its key (e.g. ``liquidai``) works if already pulled."""
+    models = _load_models()
+    tmpdir = Path(tempfile.mkdtemp(prefix="llama-preset-serve-"))
+    try:
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = str(tmpdir)
+        os.environ["LLAMA_CPP_MODELS_DIR"] = str(tmpdir / "models")
+        os.environ["LLAMA_CPP_PORT"] = "18081"
+
+        # Create the GGUF at the location the liquidai preset resolves to
+        models_dir = tmpdir / "models"
+        repo_dir = models_dir / "LiquidAI__LFM2-1.2B-GGUF"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        gguf_file = repo_dir / "LFM2-1.2B-Q4_K_M.gguf"
+        gguf_file.write_bytes(b"mock gguf content " * 60000)
+
+        mock_state, restore = _make_mock(models, tmpdir)
+
+        try:
+            # Serve by preset key — should resolve via _resolve_model
+            result = models.serve("liquidai")
+            assert "Started" in result or "ready" in result, result
+
+            # Verify the registry was NOT modified (preset serve doesn't register)
+            reg = models._load_registry()
+            assert "liquidai-lfm2-1.2b" not in reg, "preset serve should not create registry entry"
+        finally:
+            restore()
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_serve_stale_registry_entry():
+    """Serving a model whose file was deleted returns a clear error."""
+    models = _load_models()
+    tmpdir = Path(tempfile.mkdtemp(prefix="llama-stale-"))
+    try:
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = str(tmpdir)
+        os.environ["LLAMA_CPP_MODELS_DIR"] = str(tmpdir / "models")
+        os.environ["LLAMA_CPP_PORT"] = "18082"
+
+        mock_bin = tmpdir / "bin" / "llama-server"
+        mock_bin.parent.mkdir(parents=True, exist_ok=True)
+        mock_bin.write_text("#!/bin/sh\necho mock\n")
+        models.install.find_binary = lambda: mock_bin
+
+        # Register a model whose file does NOT exist
+        reg = {
+            "ghost": {
+                "repo": "Org/Repo",
+                "file": "ghost.gguf",
+                "path": "Org__Repo/ghost.gguf",
+                "size_gb": 1.0,
+            }
+        }
+        models._save_registry(reg)
+
+        result = models.serve("ghost")
+        assert "not found" in result or "not downloaded" in result.lower(), result
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_serve_unknown_model():
+    """Serving an unknown model spec returns a clear error."""
+    models = _load_models()
+    tmpdir = Path(tempfile.mkdtemp(prefix="llama-unknown-"))
+    try:
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = str(tmpdir)
+        os.environ["LLAMA_CPP_MODELS_DIR"] = str(tmpdir / "models")
+        os.environ["LLAMA_CPP_PORT"] = "18083"
+
+        mock_bin = tmpdir / "bin" / "llama-server"
+        mock_bin.parent.mkdir(parents=True, exist_ok=True)
+        mock_bin.write_text("#!/bin/sh\necho mock\n")
+        models.install.find_binary = lambda: mock_bin
+
+        result = models.serve("nonexistent-model-xyz")
+        assert "Unknown" in result or "not downloaded" in result.lower(), result
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_stop_no_server_running():
+    """Stop when no server is running returns a clear message."""
+    models = _load_models()
+    tmpdir = Path(tempfile.mkdtemp(prefix="llama-nostop-"))
+    try:
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = str(tmpdir)
+        os.environ["LLAMA_CPP_MODELS_DIR"] = str(tmpdir / "models")
+
+        result = models.stop()
+        assert "No llama-server running" in result, result
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_status_no_binary():
+    """Status when no binary is installed reports NOT installed."""
+    models = _load_models()
+    tmpdir = Path(tempfile.mkdtemp(prefix="llama-nobin-"))
+    try:
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = str(tmpdir)
+        os.environ["LLAMA_CPP_MODELS_DIR"] = str(tmpdir / "models")
+
+        status = models.status()
+        assert "NOT installed" in status, status
+        assert "no" in status, status
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

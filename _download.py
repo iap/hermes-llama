@@ -35,6 +35,13 @@ def _stream_response(resp, tmp: Path, resume_offset: int) -> None:
         out.flush()
 
 
+def _request_without_range(req):
+    """Return a fresh request with the Range header removed."""
+    new_req = urllib.request.Request(req.full_url, headers=dict(req.headers))
+    new_req.headers.pop("Range", None)
+    return new_req
+
+
 def download_file(
     url: str,
     dest: Path,
@@ -97,8 +104,7 @@ def download_file(
                 # doesn't have the requested range. Restart from scratch.
                 resume_offset = 0
                 tmp.unlink(missing_ok=True)
-                req.headers.pop("Range", None)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with urllib.request.urlopen(_request_without_range(req), timeout=timeout) as resp:
                     if getattr(resp, "status", 200) != 200:
                         raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
                     expected_len = _parse_expected_len(resp, resume_offset)

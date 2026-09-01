@@ -1,5 +1,5 @@
 name: hermes-llama
-version: 0.1.0
+version: 0.2.0
 description: >-
   Check, install, and uninstall llama.cpp across macOS / Windows / Linux without
   any package manager (official prebuilt binaries + CMake source build), and run

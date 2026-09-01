@@ -54,3 +54,6 @@ How to run local GGUF models through the `hermes-llama` plugin and the
   in config.yaml should match the value you actually serve.
 - GPU offload → set `LLAMA_CPP_N_GPU_LAYERS` (0 = CPU-only; on Apple Silicon or
   CUDA, a positive number offloads layers).
+- Binary precedence → `find_binary()` checks the plugin-managed `bin/` directory
+  first, then PATH. If the managed binary is broken, it won't fall back to a
+  system copy — run `/llama reinstall` to replace it.

@@ -59,13 +59,6 @@ MODEL_PRESETS = {
         "size_gb": 1.46,
         "note": "Stronger, slower on 2-core CPU. LFM licence.",
     },
-    "liquidai-2.5": {
-        "alias": "liquidai-lfm2.5-2.6b",
-        "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
-        "file": "LFM2.5-2.6B-Q4_K_M.gguf",
-        "size_gb": 1.56,
-        "note": "Most-downloaded LiquidAI GGUF. LFM licence.",
-    },
     "liquidai-lfm25": {
         "alias": "liquidai-lfm25-2.6b-instruct",
         "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
@@ -76,6 +69,13 @@ MODEL_PRESETS = {
                 "ctx_size 32768 (~8 tok/s); 65536 thrashes swap. Below 64K the "
                 "agent floor rejects it — chat/aux use only unless a core "
                 "floor bypass exists. LFM licence.",
+    },
+    "liquidai-2.5": {
+        "alias": "liquidai-lfm2.5-2.6b",
+        "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
+        "file": "LFM2.5-2.6B-Q4_K_M.gguf",
+        "size_gb": 1.56,
+        "note": "Deprecated alias for liquidai-lfm25. LFM licence.",
     },
     "qwen2.5-1.5b": {
         "alias": "qwen2.5-1.5b-instruct",
