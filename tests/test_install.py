@@ -428,8 +428,8 @@ def test_install_stop_loaded_server_delegates():
                 raise RuntimeError("boom")
             return self.verdict
 
-        def __getattr__(self, name):  # any private reach-in would explode here
-            raise AssertionError(f"install must not touch models.{name}")
+        def __getattr__(self, name):  # any private reach-in raises AttributeError per the data model
+            raise AttributeError(f"install must not touch models.{name}")
 
     stub = _Stub(verdict=True)
     assert install._stop_loaded_server(models_module=stub) is True

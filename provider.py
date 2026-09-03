@@ -121,7 +121,6 @@ def _sync_dashboard_entry() -> None:
     """
     try:
         from hermes_cli.config import load_config, save_config  # noqa: PLC0415
-        import json
         from pathlib import Path
 
         # Resolve the registry file directly from the environment rather than
@@ -188,15 +187,18 @@ def _sync_dashboard_entry() -> None:
         if not isinstance(pmap, dict):
             pmap = {}
         prow = None
+        matched_pid = None
         for pid, row in pmap.items():
             if isinstance(row, dict) and str(row.get("base_url", "")).rstrip("/") == base:
                 prow = row
-                pid_ours = pid
+                matched_pid = pid
                 break
         if prow is None:
             pid_ours = "llama-cpp"
             prow = {"name": "Llama CPP"}
-            pmap[pid_ours] = prow
+        else:
+            pid_ours = matched_pid
+        pmap[pid_ours] = prow
         prow.update({
             "name": "Llama CPP",
             "base_url": base,
