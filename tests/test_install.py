@@ -421,6 +421,7 @@ def test_install_stop_loaded_server_delegates():
             self.verdict = verdict
             self.raises = raises
             self.calls = 0
+            self.accessed = []
 
         def stop_loaded_server(self):
             self.calls += 1
@@ -428,15 +429,25 @@ def test_install_stop_loaded_server_delegates():
                 raise RuntimeError("boom")
             return self.verdict
 
-        def __getattr__(self, name):  # any private reach-in would explode here
-            raise AssertionError(f"install must not touch models.{name}")
+        def __getattr__(self, name):
+            # Record + raise: plain attribute syntax explodes the test, and
+            # recording keeps the guard strong even when production code uses
+            # getattr(..., default)/hasattr — those consume AttributeError
+            # silently, so the assertion below is the real tripwire.
+            self.accessed.append(name)
+            raise AttributeError(f"install must not touch models.{name}")
 
     stub = _Stub(verdict=True)
     assert install._stop_loaded_server(models_module=stub) is True
     assert stub.calls == 1
+    # __getattr__ only fires for lookups that miss the class — i.e. private
+    # reach-ins. getattr(..., default)/hasattr consume the AttributeError, so
+    # the recorded list (not the exception) is the tripwire.
+    assert stub.accessed == []
 
     stub = _Stub(verdict=False)
     assert install._stop_loaded_server(models_module=stub) is False
+    assert stub.accessed == []
 
     # Truthiness is normalised to a real bool.
     assert install._stop_loaded_server(models_module=_Stub(verdict=1)) is True

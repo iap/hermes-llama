@@ -466,7 +466,7 @@ def _source_remote_head() -> str | None:
                 sha = data.get("sha")
                 if isinstance(sha, str) and sha:
                     return sha
-    except Exception:
+    except Exception:  # noqa: BLE001 — cache read is best-effort; fall through to network fetch
         pass
     url = _github_api() + "/commits/master"
     try:
@@ -488,7 +488,7 @@ def _source_remote_head() -> str | None:
                     data["ts"] = time.time()
                     _cache_dir().mkdir(parents=True, exist_ok=True)
                     cache.write_text(json.dumps(data))
-                except Exception:  # noqa: BLE001 — cache write is best-effort
+                except Exception:  # noqa: BLE001 — cache write is best-effort; the value is already returned
                     pass
                 return json.loads(cache.read_text()).get("sha")
             data = json.loads(resp.read().decode())
@@ -502,7 +502,7 @@ def _source_remote_head() -> str | None:
                         cache_data["etag"] = etag
                     _cache_dir().mkdir(parents=True, exist_ok=True)
                     cache.write_text(json.dumps(cache_data))
-                except Exception:
+                except Exception:  # noqa: BLE001 — cache write is best-effort; sha is already returned below
                     pass
             return shastr
     except Exception:  # noqa: BLE001 — offline / rate-limited: freshness unknown
