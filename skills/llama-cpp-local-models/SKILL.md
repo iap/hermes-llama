@@ -56,4 +56,4 @@ How to run local GGUF models through the `hermes-llama` plugin and the
   CUDA, a positive number offloads layers).
 - Binary precedence → `find_binary()` checks the plugin-managed `bin/` directory
   first, then PATH. If the managed binary is broken, it won't fall back to a
-  system copy — run `/llama reinstall` to replace it.
+  system copy — run `/llama upgrade` to replace it.

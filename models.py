@@ -214,19 +214,23 @@ def _registry_txn():
     same lock, so concurrent ``pull`` calls cannot lose each other's entries.
     Falls back to an unlocked transaction when the lock cannot be taken, since
     losing a registry entry is preferable to refusing to record a finished
-    multi-GiB download.
+    multi-GiB download. The fallback guards ONLY lock acquisition: entering the
+    lock context manually (rather than wrapping the whole body in try/except)
+    means a RuntimeError raised by the caller's body propagates — and skips the
+    save — instead of being swallowed into a confusing unlocked re-entry.
     """
     try:
-        with install.registry_lock():
-            reg = _load_registry()
-            yield reg
-            _save_registry(reg)
-            return
+        lock_cm = install.registry_lock()
+        lock_cm.__enter__()
     except RuntimeError:
-        pass
-    reg = _load_registry()
-    yield reg
-    _save_registry(reg)
+        lock_cm = None
+    try:
+        reg = _load_registry()
+        yield reg
+        _save_registry(reg)
+    finally:
+        if lock_cm is not None:
+            lock_cm.__exit__(None, None, None)
 
 
 def list_models() -> str:

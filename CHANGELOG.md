@@ -5,11 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] - 2026-09-05
+
+### Fixed
+- `_download.py`: stock `urllib` raises `HTTPError` for every non-2xx status, so the old `resp.status == 416` branch was unreachable and a `.part` that had already finished downloading (promotion interrupted) failed the whole download. HTTP 416 is now handled as an exception: `Content-Range` carries the true total, a `.part` already at that size is verified and promoted, anything else is discarded and the download restarts without the Range header.
+- `_registry_txn()`: the unlocked fallback now guards only lock acquisition, so a `RuntimeError` raised inside a transaction body propagates (and skips the save) instead of being swallowed into a confusing unlocked re-entry.
+
+### Changed
+- Dashboard sync skips the `config.yaml` rewrite when the "Llama CPP" rows are already up to date — plugin registration no longer rewrites the file on every Hermes start.
+- Docs: corrected the `/llama reinstall` reference in the bundled skill to `/llama upgrade`; subcommand hints (`args_hint`, CLI help) now include `upgrade`; CONTRIBUTING documents how to run the tests.
+
+## [0.2.0] - 2026-09-04
+
+### Added
+- `liquidai-lfm25` preset (LFM2.5-2.6B, 128K-native context, tool-use trained) with agent-floor guidance; `liquidai-2.5` shipped as a deprecated alias for it.
+- Dashboard visibility: downloaded models are synced into the config's `custom_providers` entry and `providers` map (scoped to the "Llama CPP" row, matched by URL) so they appear in the web model list.
+- Integration tests (mocked pull → serve → stop lifecycle) run in CI, plus cross-platform test hardening (Windows curl stubs, win/mac runners, recursive sha256).
 
 ### Changed
 - Merged duplicate `liquidai-2.5` preset into `liquidai-lfm25` (same GGUF, kept the 128K/tool-use note).
+- Registry entries resolve by key when the `alias` field is absent; legacy absolute model paths migrate to models_dir-relative form on load.
+- `_expected_sha256` follows HF tree pagination (`Link: rel="next"` / cursor) so large repos still resolve digests.
 - Replaced nested `urlopen` in `_download.py` with a `_request_without_range()` helper for clarity.
+
+### Fixed
+- Audit hardening: PID-reuse guards, graceful shutdown (SIGTERM → SIGKILL on POSIX, CTRL_BREAK → `taskkill` on Windows), download resume, ETag-cached freshness probes.
+- Mirror endpoint is reflected into the config `providers` map so the dashboard lists the provider.
+- `_load_registry` no longer writes during lock-free reads.
+- Resolved 5 open CodeQL alerts (`provider.py`, `install.py`, tests).
 
 ## [0.1.0] - 2026-08-22
 

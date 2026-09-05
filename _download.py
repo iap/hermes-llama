@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import subprocess
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable
@@ -23,6 +24,19 @@ def _parse_expected_len(resp, resume_offset: int) -> int | None:
             # For a 206 response, Content-Length is the range size,
             # not the full file size. Add the resume offset.
             return content_len + resume_offset if resume_offset > 0 else content_len
+    except Exception:  # noqa: BLE001 — header parsing is best-effort
+        pass
+    return None
+
+
+def _parse_content_range_total(exc) -> int | None:
+    """Total transfer size from an HTTP 416's ``Content-Range: bytes */N``."""
+    try:
+        raw = exc.headers.get("Content-Range") if getattr(exc, "headers", None) else None
+        if raw and "/" in raw:
+            total = raw.rsplit("/", 1)[1].strip()
+            if total.isdigit():
+                return int(total)
     except Exception:  # noqa: BLE001 — header parsing is best-effort
         pass
     return None
@@ -60,6 +74,12 @@ def download_file(
     on success, so an interrupted download never leaves a partial file under
     its final name. When *verify* is supplied, the staged file is passed to
     it before promotion — used for checksum verification.
+
+    Resume semantics (urllib branch): a ``Range`` request answered with 206
+    continues the ``.part``; answered with 200 (server ignored Range) it
+    restarts from scratch; answered with 416 the ``.part`` is compared against
+    the true total from ``Content-Range`` — complete means promote, anything
+    else means discard and restart.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -98,31 +118,45 @@ def download_file(
             resume_offset = tmp.stat().st_size
             req.add_header("Range", f"bytes={resume_offset}-")
 
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if getattr(resp, "status", 200) == 416:
-                # Range not satisfiable — file already complete or server
-                # doesn't have the requested range. Restart from scratch.
-                resume_offset = 0
+        expected_len = None
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 416:
                 tmp.unlink(missing_ok=True)
-                with urllib.request.urlopen(_request_without_range(req), timeout=timeout) as resp:
-                    if getattr(resp, "status", 200) != 200:
-                        raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
-                    expected_len = _parse_expected_len(resp, resume_offset)
-                    _stream_response(resp, tmp, resume_offset)
+                raise
+            # Stock urlopen raises HTTPError for every non-2xx status, so a 416
+            # never reaches a `resp.status == 416` check on a response object —
+            # the "Range Not Satisfiable" recovery has to happen here. The
+            # Content-Range header carries the true total: a .part already that
+            # size is a finished transfer whose promotion was interrupted
+            # (crash/kill between download end and os.replace) — keep it and
+            # let the verify + promote steps below run. Anything else is an
+            # unusable .part: discard it and restart from scratch.
+            total = _parse_content_range_total(exc)
+            if total is not None and resume_offset > 0 and resume_offset == total:
+                expected_len = total  # nothing left to stream
+                resp = None
             else:
-                if getattr(resp, "status", 200) not in (200, 206):
-                    raise RuntimeError(f"download failed: HTTP {getattr(resp, 'status', '?')}")
-                # If the server returned 200 when we asked for a Range, it ignored
-                # the header — restart from scratch.
-                if resume_offset > 0 and getattr(resp, "status", 200) == 200:
+                tmp.unlink(missing_ok=True)
+                resume_offset = 0
+                resp = urllib.request.urlopen(_request_without_range(req), timeout=timeout)
+        if resp is not None:
+            with resp:
+                status = getattr(resp, "status", 200)
+                if status not in (200, 206):
+                    raise RuntimeError(f"download failed: HTTP {status}")
+                # A 200 to a Range request means the server ignored the header
+                # and is resending the whole body — drop the stale .part.
+                if resume_offset > 0 and status == 200:
                     resume_offset = 0
                     tmp.unlink(missing_ok=True)
                 expected_len = _parse_expected_len(resp, resume_offset)
                 _stream_response(resp, tmp, resume_offset)
-            if expected_len is not None and tmp.stat().st_size != expected_len:
-                raise RuntimeError(
-                    f"download truncated: expected {expected_len} bytes, got {tmp.stat().st_size}"
-                )
+        if expected_len is not None and tmp.stat().st_size != expected_len:
+            raise RuntimeError(
+                f"download truncated: expected {expected_len} bytes, got {tmp.stat().st_size}"
+            )
         if verify is not None:
             verify(tmp)
         os.replace(tmp, dest)
