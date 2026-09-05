@@ -77,9 +77,9 @@ def download_file(
 
     Resume semantics (urllib branch): a ``Range`` request answered with 206
     continues the ``.part``; answered with 200 (server ignored Range) it
-    restarts from scratch; answered with 416 the ``.part`` is compared against
-    the true total from ``Content-Range`` — complete means promote, anything
-    else means discard and restart.
+    restarts from scratch; answered with 416 the ``.part`` has reached (or
+    passed) EOF — it is promoted only when a *verify* callback can prove its
+    content identity, otherwise it is discarded and the download restarts.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -134,7 +134,19 @@ def download_file(
             # let the verify + promote steps below run. Anything else is an
             # unusable .part: discard it and restart from scratch.
             total = _parse_content_range_total(exc)
-            if total is not None and resume_offset > 0 and resume_offset == total:
+            if (
+                verify is not None
+                and total is not None
+                and resume_offset > 0
+                and resume_offset == total
+            ):
+                # A finished transfer whose promotion was interrupted
+                # (crash/kill between download end and os.replace). Keep the
+                # .part and let the verify + promote steps below run — the
+                # caller's verify is what proves the bytes are the ones asked
+                # for. Without a verify callback there is no content identity:
+                # a same-size stale .part (upstream file replaced since the
+                # interrupted run) must not be trusted on byte count alone.
                 expected_len = total  # nothing left to stream
                 resp = None
             else:

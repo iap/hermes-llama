@@ -1088,9 +1088,10 @@ def test_download_urllib_416_promotes_complete_part():
     Stock urlopen raises 416 as an HTTPError (non-2xx never yields a response
     object), so the old ``resp.status == 416`` branch was unreachable and a
     finished-but-unpromoted .part failed the whole download. Now Content-Range
-    carries the true total: a .part already that size is promoted with no
-    further streaming; a mismatching .part is discarded and the download
-    restarts without the Range header.
+    carries the true total: with a verify callback the complete .part is
+    promoted with no further streaming; without one (no content identity — a
+    same-size upstream swap must not win) or with a size mismatch the .part
+    is discarded and the download restarts without the Range header.
     """
     models = _load_models()
     import urllib.error as _ue
@@ -1115,6 +1116,12 @@ def test_download_urllib_416_promotes_complete_part():
             data, self._data = self._data, b""
             return data
 
+    def _raise_416(req, timeout=600):
+        raise _ue.HTTPError(
+            req.full_url, 416, "Range Not Satisfiable",
+            {"Content-Range": f"bytes */{len(body)}"}, None,
+        )
+
     tmpdir = tempfile.mkdtemp(prefix="llama-416-")
     saved_urlopen, saved_which = _ur.urlopen, models._download.shutil.which
     try:
@@ -1122,21 +1129,25 @@ def test_download_urllib_416_promotes_complete_part():
         dest = Path(tmpdir) / "m.gguf"
         part = dest.with_suffix(dest.suffix + ".part")
 
-        # (1) .part already at the full size -> promoted without re-requesting.
+        def _verify(path):
+            checks.append(path.name)
+
+        # (1) verify supplied, .part at full size -> verified and promoted
+        # without re-requesting a single byte.
         part.write_bytes(body)
-        calls = []
+        calls, checks = [], []
 
-        def _count_then_416(req, timeout=600):
+        def _count(req, timeout=600):
             calls.append(dict(req.headers))
-            raise _ue.HTTPError(
-                req.full_url, 416, "Range Not Satisfiable",
-                {"Content-Range": f"bytes */{len(body)}"}, None,
-            )
+            _raise_416(req, timeout)
 
-        _ur.urlopen = _count_then_416
-        models._download.download_file("https://example.invalid/m.gguf", dest)
+        _ur.urlopen = _count
+        models._download.download_file(
+            "https://example.invalid/m.gguf", dest, verify=_verify
+        )
         assert dest.read_bytes() == body, "complete .part was not promoted verbatim"
         assert not part.exists(), ".part not promoted"
+        assert checks == [part.name], f"staged .part not verified: {checks}"
         assert len(calls) == 1, f"complete .part must not re-request: {calls}"
 
         # (2) .part shorter than the real total -> discarded, restart from
@@ -1148,18 +1159,31 @@ def test_download_urllib_416_promotes_complete_part():
         def _416_then_200(req, timeout=600):
             calls.append(dict(req.headers))
             if "Range" in req.headers:
-                raise _ue.HTTPError(
-                    req.full_url, 416, "Range Not Satisfiable",
-                    {"Content-Range": f"bytes */{len(body)}"}, None,
-                )
+                _raise_416(req, timeout)
             return _Resp(body)
 
         _ur.urlopen = _416_then_200
-        models._download.download_file("https://example.invalid/m.gguf", dest)
+        models._download.download_file(
+            "https://example.invalid/m.gguf", dest, verify=_verify
+        )
         assert dest.read_bytes() == body, "restart did not produce the full body"
         assert not part.exists(), ".part left behind after promotion"
         assert len(calls) == 2, calls
         assert "Range" in calls[0] and "Range" not in calls[1], calls
+
+        # (3) NO verify callback, .part at full size -> must NOT be promoted:
+        # byte count alone proves nothing about content identity, so a stale
+        # same-size .part (upstream file replaced) would silently win. The
+        # .part is discarded and the download restarts — two requests, and the
+        # body comes from the fresh 200, not the promoted .part.
+        dest.unlink()
+        part.write_bytes(body)
+        calls.clear()
+        _ur.urlopen = _416_then_200
+        models._download.download_file("https://example.invalid/m.gguf", dest)
+        assert dest.read_bytes() == body, "restart did not produce the full body"
+        assert len(calls) == 2, f"stale .part was promoted without verify: {calls}"
+        assert "Range" not in calls[1], calls
     finally:
         _ur.urlopen = saved_urlopen
         models._download.shutil.which = saved_which
@@ -1332,9 +1356,8 @@ def test_registry_txn_body_error_propagates():
                 raise RuntimeError("boom")
         except RuntimeError as exc:
             assert "boom" in str(exc), exc
-        else:
-            raise AssertionError("body RuntimeError was swallowed")
-        # The failed transaction must not persist its partial write.
+        # The failed transaction must not persist its partial write. (If the
+        # error ever stopped propagating, the txn would save and this fails.)
         assert models._load_registry() == {}, models._load_registry()
     finally:
         if saved is None:
