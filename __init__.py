@@ -94,7 +94,7 @@ def _handle_slash(raw_args: str) -> str:
 
 
 def _setup_cli(subparser: Any) -> None:
-    subparser.add_argument("sub", nargs="?", default="help", help="check|install|uninstall|status|models|pull|serve|stop|help")
+    subparser.add_argument("sub", nargs="?", default="help", help="check|install|upgrade|uninstall|status|models|pull|serve|stop|help")
     subparser.add_argument("args", nargs="*", help="arguments for the subcommand")
 
 
@@ -172,7 +172,7 @@ def register(ctx: Any) -> None:
             "Manage llama.cpp: check/install/uninstall, pull GGUF models "
             "(LiquidAI sample), and serve/stop a local 'Llama CPP' server."
         ),
-        args_hint="<check|install|uninstall|status|models|pull|serve|stop|help>",
+        args_hint="<check|install|upgrade|uninstall|status|models|pull|serve|stop|help>",
     )
 
     # 3. Terminal command `hermes llama ...`.

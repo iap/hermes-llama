@@ -1082,6 +1082,114 @@ def test_download_model_resumes_partial():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_download_urllib_416_promotes_complete_part():
+    """HTTP 416 must be handled at the HTTPError, not via resp.status.
+
+    Stock urlopen raises 416 as an HTTPError (non-2xx never yields a response
+    object), so the old ``resp.status == 416`` branch was unreachable and a
+    finished-but-unpromoted .part failed the whole download. Now Content-Range
+    carries the true total: with a verify callback the complete .part is
+    promoted with no further streaming; without one (no content identity — a
+    same-size upstream swap must not win) or with a size mismatch the .part
+    is discarded and the download restarts without the Range header.
+    """
+    models = _load_models()
+    import urllib.error as _ue
+    import urllib.request as _ur
+
+    body = b"complete gguf payload " * 40
+
+    class _Resp:
+        status = 200
+        headers = {}
+
+        def __init__(self, data):
+            self._data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n=-1):
+            data, self._data = self._data, b""
+            return data
+
+    def _raise_416(req, timeout=600):
+        raise _ue.HTTPError(
+            req.full_url, 416, "Range Not Satisfiable",
+            {"Content-Range": f"bytes */{len(body)}"}, None,
+        )
+
+    tmpdir = tempfile.mkdtemp(prefix="llama-416-")
+    saved_urlopen, saved_which = _ur.urlopen, models._download.shutil.which
+    try:
+        models._download.shutil.which = lambda name: None  # force urllib branch
+        dest = Path(tmpdir) / "m.gguf"
+        part = dest.with_suffix(dest.suffix + ".part")
+
+        def _verify(path):
+            checks.append(path.name)
+
+        # (1) verify supplied, .part at full size -> verified and promoted
+        # without re-requesting a single byte.
+        part.write_bytes(body)
+        calls, checks = [], []
+
+        def _count(req, timeout=600):
+            calls.append(dict(req.headers))
+            _raise_416(req, timeout)
+
+        _ur.urlopen = _count
+        models._download.download_file(
+            "https://example.invalid/m.gguf", dest, verify=_verify
+        )
+        assert dest.read_bytes() == body, "complete .part was not promoted verbatim"
+        assert not part.exists(), ".part not promoted"
+        assert checks == [part.name], f"staged .part not verified: {checks}"
+        assert len(calls) == 1, f"complete .part must not re-request: {calls}"
+
+        # (2) .part shorter than the real total -> discarded, restart from
+        # scratch without the Range header.
+        dest.unlink()
+        part.write_bytes(body[:100])
+        calls.clear()
+
+        def _416_then_200(req, timeout=600):
+            calls.append(dict(req.headers))
+            if "Range" in req.headers:
+                _raise_416(req, timeout)
+            return _Resp(body)
+
+        _ur.urlopen = _416_then_200
+        models._download.download_file(
+            "https://example.invalid/m.gguf", dest, verify=_verify
+        )
+        assert dest.read_bytes() == body, "restart did not produce the full body"
+        assert not part.exists(), ".part left behind after promotion"
+        assert len(calls) == 2, calls
+        assert "Range" in calls[0] and "Range" not in calls[1], calls
+
+        # (3) NO verify callback, .part at full size -> must NOT be promoted:
+        # byte count alone proves nothing about content identity, so a stale
+        # same-size .part (upstream file replaced) would silently win. The
+        # .part is discarded and the download restarts — two requests, and the
+        # body comes from the fresh 200, not the promoted .part.
+        dest.unlink()
+        part.write_bytes(body)
+        calls.clear()
+        _ur.urlopen = _416_then_200
+        models._download.download_file("https://example.invalid/m.gguf", dest)
+        assert dest.read_bytes() == body, "restart did not produce the full body"
+        assert len(calls) == 2, f"stale .part was promoted without verify: {calls}"
+        assert "Range" not in calls[1], calls
+    finally:
+        _ur.urlopen = saved_urlopen
+        models._download.shutil.which = saved_which
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def test_extract_rejects_zip_symlink():
     """The zip branch refuses symlink members, matching the tar branch.
 
@@ -1221,6 +1329,36 @@ def test_registry_txn_serializes_concurrent_writers():
 
         # Unique temp names: no stale fixed-name tmp left behind.
         assert not list(Path(tmpdir).glob("models.json.tmp")), "fixed tmp name still used"
+    finally:
+        if saved is None:
+            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+        else:
+            os.environ["LLAMA_CPP_INSTALL_DIR"] = saved
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_registry_txn_body_error_propagates():
+    """A RuntimeError inside a transaction body must propagate, not restart.
+
+    The unlocked fallback in _registry_txn exists for lock-acquisition
+    failures only. When it wrapped the whole body, a body RuntimeError was
+    caught, the generator yielded a second time, and contextlib replaced the
+    caller's error with 'generator didn't stop after throw()'.
+    """
+    models = _load_models()
+    tmpdir = tempfile.mkdtemp(prefix="llama-txnerr-")
+    saved = os.environ.get("LLAMA_CPP_INSTALL_DIR")
+    try:
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = tmpdir
+        try:
+            with models._registry_txn() as reg:
+                reg["partial"] = {"path": "x/m.gguf", "size_gb": 0.1}
+                raise RuntimeError("boom")
+        except RuntimeError as exc:
+            assert "boom" in str(exc), exc
+        # The failed transaction must not persist its partial write. (If the
+        # error ever stopped propagating, the txn would save and this fails.)
+        assert models._load_registry() == {}, models._load_registry()
     finally:
         if saved is None:
             os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
