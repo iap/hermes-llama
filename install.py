@@ -348,6 +348,17 @@ def find_binary() -> Path | None:
     return None
 
 
+def _sha256_of(path: Path) -> str:
+    """Streaming sha256 (1 MiB chunks) — never loads a multi-GB archive in RAM."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _smoke_test(binary: Path, timeout: float | None = None) -> tuple[bool, str]:
     """Run ``--version``. Returns ``(ok, info)``.
 
@@ -424,6 +435,7 @@ def _check_impl(*, fetch_latest: bool = True) -> dict:
     meta = _read_meta()
     result["tag"] = meta.get("tag")
     result["backend"] = meta.get("backend")
+    result["archive_sha256"] = meta.get("archive_sha256")
     method = meta.get("method")
     # Backward-compat: pre-`method` meta files recorded source builds as tag="source".
     if method is None and meta.get("tag") == "source":
@@ -945,6 +957,19 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
     if asset:
         archive = _download_cached(tag, asset)
         if archive is not None:
+            archive_digest = _sha256_of(archive)
+            _previous = _read_meta()
+            _tamper = ""
+            if (
+                _previous.get("tag") == tag
+                and _previous.get("archive_sha256")
+                and _previous.get("archive_sha256") != archive_digest
+            ):
+                _tamper = (
+                    f"; TAMPER WARNING: archive digest for {tag} changed between installs "
+                    f"({_previous.get('archive_sha256')[:16]} -> {archive_digest[:16]}); "
+                    "verify the release before trusting it"
+                )
             with tempfile.TemporaryDirectory() as tmp:
                 _extract(archive, Path(tmp))
                 # Locked unique staging -> atomic swap with restore
@@ -969,9 +994,14 @@ def _install_impl(backend: str | None, version: str | None, force: bool) -> dict
                                     "If this is macOS < 13.3, the prebuilt requires a newer OS."
                                 ),
                             }
-                        return _commit_staged_bin(
-                            staging, backup, {"tag": tag, "method": "prebuilt", "backend": backend}
+                        result = _commit_staged_bin(
+                            staging, backup,
+                            {"tag": tag, "method": "prebuilt", "backend": backend,
+                             "archive_sha256": archive_digest},
                         )
+                        if _tamper:
+                            result["detail"] = (result.get("detail") or "") + _tamper
+                        return result
                     finally:
                         try:
                             if staging.exists():
