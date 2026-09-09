@@ -15,9 +15,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Lint + compile + manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Cache pip
+        uses: actions/cache@0dba19237e210b51405824561a0e2b2e5d405096  # v4.3.0
+        with:
+          path: ~/.cache/pip
+          key: lint-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Install lint dependencies
+        run: python -m pip install "PyYAML==6.0.3" "ruff==0.16.4"
+
+      - name: Compile-check all Python files
+        run: python -m py_compile $(find . -type f -name '*.py' -not -path '*/.git/*')
+
+      - name: Validate plugin manifests (YAML)
+        run: python tests/validate_manifests.py
+
+      - name: Lint with ruff
+        run: ruff check .
+
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    needs: lint
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       # Full Python matrix on Linux (primary); Windows/macOS cover the
@@ -44,6 +77,12 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@0dba19237e210b51405824561a0e2b2e5d405096  # v4.3.0
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('.github/workflows/ci.yml') }}
 
       - name: Install test dependencies
         run: python -m pip install "PyYAML==6.0.3" "ruff==0.16.4"
