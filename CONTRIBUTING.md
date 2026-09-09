@@ -51,6 +51,21 @@ Please follow the existing code style in the project. If a linter or formatter i
   are named module-level constants (`REPO`, `GITHUB_API`, …) so they stay obvious
   and replaceable (e.g. for mirrors).
 
+## Running the tests
+
+The tests are dependency-free standalone scripts — they are **not** run with
+pytest (the plugin modules are loaded through custom import machinery, so
+pytest collection fails). Run them exactly the way CI does:
+
+```bash
+python tests/test_install.py                 # unit tests
+python tests/integration/test_lifecycle.py   # pull → serve → stop lifecycle (mocked)
+python tests/validate_manifests.py           # plugin.yaml sanity
+ruff check .                                 # lint (version pinned in CI)
+```
+
+Each script prints `PASS`/`FAIL` lines and exits non-zero on any failure.
+
 ## Pinning on git CI
 
 GitHub Actions referenced in `.github/workflows/*.yml` MUST be pinned to prevent

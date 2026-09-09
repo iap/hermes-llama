@@ -121,7 +121,6 @@ def _sync_dashboard_entry() -> None:
     """
     try:
         from hermes_cli.config import load_config, save_config  # noqa: PLC0415
-        import json
         from pathlib import Path
 
         # Resolve the registry file directly from the environment rather than
@@ -170,6 +169,28 @@ def _sync_dashboard_entry() -> None:
                 ours = entry
                 break
 
+        # The dashboard reads endpoints from cfg["providers"] (a dict keyed by
+        # id), NOT from custom_providers — mirror our entry there too so the
+        # "switch model" list sees it. Scoped the same way: URL-matched, ours
+        # only, siblings untouched. (Read-only search: runs before any mutation
+        # so the snapshot below sees the original state.)
+        pmap = cfg.get("providers")
+        if not isinstance(pmap, dict):
+            pmap = {}
+        prow = None
+        matched_pid = None
+        for pid, row in pmap.items():
+            if isinstance(row, dict) and str(row.get("base_url", "")).rstrip("/") == base:
+                prow = row
+                matched_pid = pid
+                break
+
+        # Snapshot our rows before mutating: register() runs on every Hermes
+        # start, and an unconditional save_config() would turn every load into
+        # a config.yaml rewrite (mtime churn, clobber races with concurrent
+        # hermes processes) even when nothing moved.
+        before = json.dumps([providers, prow], sort_keys=True, default=str)
+
         if ours is None:
             ours = {"name": "Llama CPP", "base_url": base}
             providers.append(ours)
@@ -180,23 +201,12 @@ def _sync_dashboard_entry() -> None:
         ours["models"] = {m: {} for m in models} if models else {}
         ours["discover_models"] = True  # /v1/models is live on our server
 
-        # The dashboard reads endpoints from cfg["providers"] (a dict keyed by
-        # id), NOT from custom_providers — mirror our entry there too so the
-        # "switch model" list sees it. Scoped the same way: URL-matched, ours
-        # only, siblings untouched.
-        pmap = cfg.get("providers")
-        if not isinstance(pmap, dict):
-            pmap = {}
-        prow = None
-        for pid, row in pmap.items():
-            if isinstance(row, dict) and str(row.get("base_url", "")).rstrip("/") == base:
-                prow = row
-                pid_ours = pid
-                break
         if prow is None:
             pid_ours = "llama-cpp"
             prow = {"name": "Llama CPP"}
-            pmap[pid_ours] = prow
+        else:
+            pid_ours = matched_pid
+        pmap[pid_ours] = prow
         prow.update({
             "name": "Llama CPP",
             "base_url": base,
@@ -209,7 +219,9 @@ def _sync_dashboard_entry() -> None:
         cfg["providers"] = pmap
 
         cfg["custom_providers"] = providers
-        save_config(cfg)
+        after = json.dumps([providers, prow], sort_keys=True, default=str)
+        if after != before:
+            save_config(cfg)
     except Exception:  # noqa: BLE001 — visibility is best-effort
         logger.debug("dashboard entry sync skipped", exc_info=True)
 
