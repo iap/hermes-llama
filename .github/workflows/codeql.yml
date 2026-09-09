@@ -33,7 +33,7 @@ jobs:
           languages: python
           queries: security-and-quality
       - name: Autobuild
-        uses: github/codeql-action/autobuild@e4d2851c4593439ac10bdcd57c5b06cac73b4775  # v3.37.8
+        uses: github/codeql-action/autobuild@42947a340483f03ba47bb1a039b2c519aab3df85  # v3.37.8
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@42947a340483f03ba47bb1a039b2c519aab3df85  # v3.37.8
         with:
