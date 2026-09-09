@@ -1631,6 +1631,7 @@ def test_install_warns_on_same_tag_digest_change():
     install = _load_install()
     saved = (install.check, install._download_cached, install._smoke_test,
              install._asset_name, install._latest_tag, install.find_binary)
+    saved_env = os.environ.get("LLAMA_CPP_INSTALL_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "llama-cpp"
         (root / "bin").mkdir(parents=True)
