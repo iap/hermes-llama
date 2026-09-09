@@ -29,7 +29,7 @@ jobs:
           python-version: "3.13"
 
       - name: Cache pip
-        uses: actions/cache@0dba19237e210b51405824561a0e2b2e5d405096  # v4.3.0
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
         with:
           path: ~/.cache/pip
           key: lint-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -79,7 +79,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Cache pip
-        uses: actions/cache@0dba19237e210b51405824561a0e2b2e5d405096  # v4.3.0
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('.github/workflows/ci.yml') }}

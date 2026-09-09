@@ -31,12 +31,14 @@ jobs:
           echo "Tag v$TAG matches plugin.yaml version $PLUGIN_VERSION"
 
       - name: Extract changelog entry
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
           # Extract the changelog section for this version
           # Matches from "## [VERSION]" to the next "## [" or end of file
           python3 -c "
-          import re, sys
+          import os, re, sys
+          version = os.environ['VERSION'].lstrip('v')
           with open('CHANGELOG.md') as f:
               content = f.read()
           pattern = rf'## \[{re.escape(version)}\].*?(?=\n## \[|\Z)'
