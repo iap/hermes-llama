@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - False-positive tamper test now captures exact archive bytes to defeat gzip mtime nondeterminism.
 
+## [0.2.1] - 2026-09-05
 
 ### Fixed
 - `_download.py`: stock `urllib` raises `HTTPError` for every non-2xx status, so the old `resp.status == 416` branch was unreachable and a `.part` that had already finished downloading (promotion interrupted) failed the whole download. HTTP 416 is now handled as an exception: `Content-Range` carries the true total, a `.part` already at that size is verified and promoted, anything else is discarded and the download restarts without the Range header.

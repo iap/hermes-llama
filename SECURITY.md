@@ -11,7 +11,7 @@ The plugin tracks a single latest release. Older versions receive no backports â
 ## Supply-Chain Integrity
 
 - GGUF downloads are verified against upstream HuggingFace `lfs.oid` digests before `.part` promotion. Fails open when no digest is available.
-- Prebuilt binary archives are verified against their own sha256 at install time; a digest change on the same release tag triggers a **TAMPER WARNING**.
+- Prebuilt binary archives: the installer records the sha256 of each downloaded archive locally. Reinstalling the same release tag with a changed archive appends a **TAMPER WARNING** to the result detail â€” this is advisory change detection, not authentication against an independently trusted digest. A compromised first download is accepted; the warning fires only when the archive changes after a known-good install.
 - CI workflow actions are pinned by full 40-char commit SHA (see CONTRIBUTING.md).
 
 ## Reporting a Vulnerability
