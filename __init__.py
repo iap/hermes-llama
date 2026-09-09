@@ -6,7 +6,7 @@ Registers:
 - Slash command ``/llama`` and CLI command ``hermes llama`` for managing
   the binary and models.
 
-Subcommands: check, install, uninstall, status, models, pull, serve, stop, help.
+Subcommands: check, install, upgrade, uninstall, status, models, pull, serve, stop, help.
 """
 
 from __future__ import annotations
