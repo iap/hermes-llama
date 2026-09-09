@@ -1576,6 +1576,7 @@ def test_install_persists_archive_digest():
     install = _load_install()
     saved = (install.check, install._download_cached, install._smoke_test,
              install._asset_name, install._latest_tag, install.find_binary)
+    saved_env = os.environ.get("LLAMA_CPP_INSTALL_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "llama-cpp"
         (root / "bin").mkdir(parents=True)
@@ -1615,7 +1616,10 @@ def test_install_persists_archive_digest():
         finally:
             install.check, install._download_cached, install._smoke_test, \
                 install._asset_name, install._latest_tag, install.find_binary = saved
-            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+            if saved_env is None:
+                os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+            else:
+                os.environ["LLAMA_CPP_INSTALL_DIR"] = saved_env
 
 
 def test_install_warns_on_same_tag_digest_change():
@@ -1676,7 +1680,10 @@ def test_install_warns_on_same_tag_digest_change():
         finally:
             install.check, install._download_cached, install._smoke_test, \
                 install._asset_name, install._latest_tag, install.find_binary = saved
-            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+            if saved_env is None:
+                os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+            else:
+                os.environ["LLAMA_CPP_INSTALL_DIR"] = saved_env
 
 
 def test_install_no_tamper_warning_when_digest_matches():
@@ -1687,6 +1694,7 @@ def test_install_no_tamper_warning_when_digest_matches():
     install = _load_install()
     saved = (install.check, install._download_cached, install._smoke_test,
              install._asset_name, install._latest_tag, install.find_binary)
+    saved_env = os.environ.get("LLAMA_CPP_INSTALL_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "llama-cpp"
         (root / "bin").mkdir(parents=True)
@@ -1707,6 +1715,9 @@ def test_install_no_tamper_warning_when_digest_matches():
         _make_archive("stable")
         import hashlib
         good_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        # Capture the EXACT archive bytes: gzip records mtime, so re-creating the
+        # archive would produce a different digest (Greptile P1 nondeterminism).
+        stable_bytes = archive.read_bytes()
         install._write_meta({"tag": "b10549", "method": "prebuilt", "backend": "cpu",
                              "archive_sha256": good_digest, "binary": "b"})
         install.check = lambda: {
@@ -1716,7 +1727,9 @@ def test_install_no_tamper_warning_when_digest_matches():
         }
 
         def _fake_download(tag, asset):
-            _make_archive("stable")  # identical bytes again
+            # Restore the EXACT captured bytes: no gzip-mtime nondeterminism.
+            with open(archive, "wb") as f:
+                f.write(stable_bytes)
             return archive
 
         install._download_cached = _fake_download
@@ -1733,4 +1746,7 @@ def test_install_no_tamper_warning_when_digest_matches():
         finally:
             install.check, install._download_cached, install._smoke_test, \
                 install._asset_name, install._latest_tag, install.find_binary = saved
-            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+            if saved_env is None:
+                os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+            else:
+                os.environ["LLAMA_CPP_INSTALL_DIR"] = saved_env
