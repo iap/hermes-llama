@@ -10,10 +10,19 @@
 - [ ] Refactor / cleanup
 - [ ] Other (describe):
 
+## Platform
+<!-- Which OS did you test on? -->
+- [ ] macOS
+- [ ] Windows
+- [ ] Linux
+- [ ] Not platform-specific
+
 ## Checklist
 - [ ] Ran `python -m py_compile` on all `.py` files
 - [ ] Validated `plugin.yaml` parses as YAML
 - [ ] Ran the smoke tests (`python tests/test_install.py`)
+- [ ] Ran integration tests (`python tests/integration/test_lifecycle.py`)
+- [ ] Ran `ruff check .` (lint)
 - [ ] Updated docs (README / SKILL.md / plugin.yaml description) if behavior changed
 
 ## Related issues

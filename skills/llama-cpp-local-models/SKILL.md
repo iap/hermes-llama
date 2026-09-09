@@ -57,3 +57,4 @@ How to run local GGUF models through the `hermes-llama` plugin and the
 - Binary precedence → `find_binary()` checks the plugin-managed `bin/` directory
   first, then PATH. If the managed binary is broken, it won't fall back to a
   system copy — run `/llama upgrade` to replace it.
+- **TAMPER WARNING on install/upgrade** → the plugin records the sha256 of each downloaded archive. If you reinstall the same release tag and the archive digest has changed, the result detail includes a TAMPER WARNING. This is advisory change detection, not authentication — a compromised first download is accepted unchanged; the warning fires only when the archive changes after a known-good install. `check()` returns the recorded `archive_sha256` in its dict output.

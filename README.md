@@ -66,7 +66,7 @@ Everything lives under `$HERMES_HOME/llama-cpp/`:
 | `server.log` | llama-server stdout/stderr (append mode; check here first when serve fails) |
 | `server.pid` | PID file for the running server (removed on stop) |
 | `.version` | Install metadata: tag/method/backend/commit — powers `check` freshness |
-| `.cache/source_head.json`, `.cache/tag.json` | Upstream freshness caches (600 s TTL) |
+| `.cache/source_head.json`, `.cache/latest_tag.json` | Upstream freshness caches (600 s TTL) |
 | `.install.lock`, `.registry.lock` | Interprocess locks (install vs model pulls) |
 
 **Ports:** llama-server listens on `127.0.0.1:8080/v1` (configurable). The Hermes
