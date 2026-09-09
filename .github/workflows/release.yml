@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Validate tag matches plugin.yaml
+        run: |
+          TAG=${GITHUB_REF#refs/tags/v}
+          PLUGIN_VERSION=$(grep '^version:' plugin.yaml | awk '{print $2}')
+          if [ "$TAG" != "$PLUGIN_VERSION" ]; then
+            echo "ERROR: Tag v$TAG does not match plugin.yaml version $PLUGIN_VERSION"
+            exit 1
+          fi
+          echo "Tag v$TAG matches plugin.yaml version $PLUGIN_VERSION"
+
+      - name: Extract changelog entry
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          # Extract the changelog section for this version
+          # Matches from "## [VERSION]" to the next "## [" or end of file
+          python3 -c "
+          import re, sys
+          with open('CHANGELOG.md') as f:
+              content = f.read()
+          pattern = rf'## \[{re.escape(version)}\].*?(?=\n## \[|\Z)'
+          match = re.search(pattern, content, re.DOTALL)
+          if not match:
+              print(f'No changelog entry found for [{version}]', file=sys.stderr)
+              sys.exit(1)
+          notes = match.group(0).strip()
+          # Remove the heading line itself
+          lines = notes.split('\n')
+          body = '\n'.join(lines[1:]).strip()
+          with open('release_notes.md', 'w') as f:
+              f.write(body)
+          print(f'Extracted {len(body)} chars of release notes')
+          "
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@8b5ffb5e7afe26591ab954ea95b8b21d57a46c8d  # v2.2.1
+        with:
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
