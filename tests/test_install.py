@@ -1615,7 +1615,7 @@ def test_install_persists_archive_digest():
         finally:
             install.check, install._download_cached, install._smoke_test, \
                 install._asset_name, install._latest_tag, install.find_binary = saved
-            saved_env = os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
 
 
 def test_install_warns_on_same_tag_digest_change():
@@ -1673,6 +1673,63 @@ def test_install_warns_on_same_tag_digest_change():
             meta = install._read_meta()
             assert meta.get("archive_sha256") == __import__("hashlib").sha256(
                 archive.read_bytes()).hexdigest()
+        finally:
+            install.check, install._download_cached, install._smoke_test, \
+                install._asset_name, install._latest_tag, install.find_binary = saved
+            os.environ.pop("LLAMA_CPP_INSTALL_DIR", None)
+
+
+def test_install_no_tamper_warning_when_digest_matches():
+    """False-positive guard: reinstalling the SAME tag with the SAME archive
+    content (the upstream re-built the tag, or a cached re-download) must
+    NOT append a TAMPER WARNING - the warning fires only on a digest change.
+    """
+    install = _load_install()
+    saved = (install.check, install._download_cached, install._smoke_test,
+             install._asset_name, install._latest_tag, install.find_binary)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "llama-cpp"
+        (root / "bin").mkdir(parents=True)
+        os.environ["LLAMA_CPP_INSTALL_DIR"] = str(root)
+
+        import tarfile
+        archive = Path(tmp) / "llama-b10549-bin-ubuntu-x64.tar.gz"
+        payload = Path(tmp) / "payload"
+        payload.mkdir()
+        (payload / "llama-server").write_text("#!/bin/sh\n")
+
+        def _make_archive(marker):
+            with tarfile.open(archive, "w:gz") as tf:
+                tf.add(payload / "llama-server", arcname="llama-server")
+            with open(archive, "ab") as f:
+                f.write(marker.encode())
+
+        _make_archive("stable")
+        import hashlib
+        good_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        install._write_meta({"tag": "b10549", "method": "prebuilt", "backend": "cpu",
+                             "archive_sha256": good_digest, "binary": "b"})
+        install.check = lambda: {
+            "installed": True, "binary": "b", "version": "v", "runs": True,
+            "tag": "b10549", "latest_tag": "b10549", "up_to_date": True,
+            "backend": "cpu", "method": "prebuilt",
+        }
+
+        def _fake_download(tag, asset):
+            _make_archive("stable")  # identical bytes again
+            return archive
+
+        install._download_cached = _fake_download
+        install._smoke_test = lambda binary, timeout=30.0: (True, "stub")
+        install._asset_name = lambda tag, backend: archive.name
+        install._latest_tag = lambda: "b10549"
+        install.find_binary = lambda: payload / "llama-server"
+        try:
+            with _Platform(arch="x64"):
+                r = install.install(backend="cpu", force=True)
+            detail = r.get("detail") or ""
+            assert r.get("ok") is True, r
+            assert "TAMPER WARNING" not in detail, detail
         finally:
             install.check, install._download_cached, install._smoke_test, \
                 install._asset_name, install._latest_tag, install.find_binary = saved
