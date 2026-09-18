@@ -12,6 +12,23 @@ description: >-
 How to run local GGUF models through the `hermes-llama` plugin and the
 **"Llama CPP"** provider in Hermes Agent.
 
+## Terminology — llama.cpp, Ollama, and LFM are not the same thing
+
+These get conflated; they are not interchangeable:
+
+- **llama.cpp** = the C++ inference **engine** (ggml). The plugin installs and runs
+  it as `llama-server`. This is what the plugin installs.
+- **"Llama CPP"** = just the **provider label** Hermes shows in the model picker.
+  It is not an app — it is the name of the `llama-cpp` provider entry pointing at
+  the local server.
+- **Ollama** = a **different serving toolchain** — its own CLI, server, and model
+  registry. It can also serve GGUFs, but it is a separate project with a different
+  API. This plugin has **no Ollama integration**; an Ollama install on the same
+  host is simply ignored.
+- **LFM (LiquidAI)** = a **model weight family** (LFM2, LFM2.5), shipped as GGUF
+  files. Not an engine — served through llama.cpp here.
+- **GGUF** = the file format. Shared by llama.cpp and Ollama; the engines are not.
+
 ## Commands
 
 - `/llama check` — is `llama-server` installed, and which version?

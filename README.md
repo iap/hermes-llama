@@ -16,6 +16,23 @@ across platforms and needs no admin privileges or pre-installed toolchain:
 No Homebrew, Winget, conda, Nix, or MacPorts. Everything lives under
 `$HERMES_HOME/llama-cpp/` (portable, per-user).
 
+## Terminology: llama.cpp, Ollama, and LFM are not the same thing
+
+This plugin touches three separate concepts that get conflated — especially by an
+agent reading the docs for the first time. They are **not** interchangeable:
+
+| Term | What it is | This plugin |
+|---|---|---|
+| **llama.cpp** | The C++ inference **engine** (ggml backend). It is the program that loads a GGUF and runs it. The plugin installs it as `llama-server`, its OpenAI-compatible server binary. | **Yes** — installs and runs it. |
+| **"Llama CPP"** | Just the **provider label** Hermes shows in the model picker. It is *not* an app; it is the name of the `llama-cpp` provider entry that points at the local server. | Registers it. |
+| **Ollama** | A **separate serving toolchain** — its own CLI (`ollama pull`, `ollama run`), its own server, its own model registry. It can also serve GGUFs (and in some builds wraps llama.cpp under the hood), but it is a different project with a different API surface. | **No** — no Ollama integration, no dependency, no requirement. Ollama may be installed on the same host and simply ignored. |
+| **LFM (LiquidAI)** | A **model weight family**, not an engine: `LFM2`, `LFM2.5` (presets `liquidai`, `liquidai-350m`, `liquidai-2.6b`, `liquidai-lfm25`). They ship as GGUF files you download and serve through *any* engine — llama.cpp here. | Ships the sample presets for it. |
+| **GGUF** | The file format the weights come in. llama.cpp, Ollama, and others all accept GGUF — the format is shared, the engines are not. | Downloads GGUFs. |
+
+**In one line:** llama.cpp is the *engine*, Ollama is a *different engine*,
+"Llama CPP" is just a *label*, and LFM is a *model*. Only llama.cpp is what this
+plugin installs.
+
 ## What it does
 
 1. **Manages `llama-server`** (llama.cpp's OpenAI-compatible server):
