@@ -123,6 +123,41 @@ _CONFIG_ENV = {
 }
 
 
+def _read_native_provider_config() -> dict[str, str | None] | None:
+    """Read the llama-cpp row from config.yaml's ``providers`` dict.
+
+    Returns ``{base_url, host, port}`` parsed from the row, or None when the
+    row is absent or unreadable. *port* is ``None`` when the row's base_url
+    carries no explicit port — the caller must not fabricate one. Used as a
+    fallback in :func:`_wire_config` so a value set through Hermes' native
+    ``hermes model`` wizard (which writes to ``providers.llama-cpp``) still
+    reaches the server — without this the dashboard row and the
+    ``LLAMA_CPP_*`` env vars the server reads can drift apart: the user sees
+    the change take in the model picker while the server keeps binding to the
+    old address.
+    """
+    try:
+        from hermes_cli.config import load_config
+        from urllib.parse import urlsplit
+
+        cfg = load_config()
+        providers = cfg.get("providers")
+        if not isinstance(providers, dict):
+            return None
+        row = providers.get("llama-cpp")
+        if not isinstance(row, dict):
+            return None
+        base = str(row.get("base_url", "")).strip().rstrip("/")
+        if not base:
+            return None
+        parts = urlsplit(base)
+        host = parts.hostname or "127.0.0.1"
+        port = str(parts.port) if parts.port else None
+        return {"base_url": base, "host": host, "port": port}
+    except Exception:
+        return None
+
+
 def _wire_config(ctx: Any) -> None:
     """Apply Hermes settings (config_schema) to the LLAMA_CPP_* env vars.
 
@@ -134,6 +169,11 @@ def _wire_config(ctx: Any) -> None:
     When ``host`` or ``port`` are set and no explicit ``LLAMA_CPP_BASE_URL`` is
     configured, the provider base URL is derived as ``http://{host}:{port}/v1``
     so the server and provider agree on the endpoint.
+
+    A value set through Hermes' native ``hermes model`` wizard lands in
+    ``providers.llama-cpp`` rather than the plugin settings; it is read back
+    as a last resort (only when no env var or plugin setting has addressed the
+    endpoint) so the server binds where the dashboard row points.
     """
     if not hasattr(ctx, "get_config"):
         return
@@ -146,6 +186,32 @@ def _wire_config(ctx: Any) -> None:
             val = None
         if val is not None and str(val).strip() != "":
             os.environ[env_name] = str(val).strip()
+    # Fallback: a value set through Hermes' native `hermes model` wizard
+    # lands in providers.llama-cpp, not in the plugin settings. Read it
+    # back so the server binds where the dashboard row points — otherwise
+    # editing the provider there silently changes nothing about the
+    # running server, and the two surfaces drift apart. Only consulted
+    # when nothing else has set the address: plugin settings and the
+    # derivation block below already take precedence.
+    if not (
+        os.environ.get("LLAMA_CPP_BASE_URL")
+        or os.environ.get("LLAMA_CPP_HOST")
+        or os.environ.get("LLAMA_CPP_PORT")
+    ):
+        native = _read_native_provider_config()
+        if native:
+            base = native.get("base_url")
+            port = native.get("port")
+            host_val = native.get("host")
+            if base:
+                os.environ["LLAMA_CPP_BASE_URL"] = base
+            # Only propagate host/port when the URL carried an explicit port.
+            # A portless URL (http://localhost/v1) already encodes both, so
+            # writing LLAMA_CPP_HOST/PORT would be dead config that the
+            # derivation block below never reads (base_url is already set).
+            if port is not None and host_val:
+                os.environ["LLAMA_CPP_HOST"] = host_val
+                os.environ["LLAMA_CPP_PORT"] = port
     # Derive provider base URL from host+port when not explicitly set.
     if not os.environ.get("LLAMA_CPP_BASE_URL"):
         host = (os.environ.get("LLAMA_CPP_HOST") or "").strip()

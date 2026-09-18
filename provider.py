@@ -37,7 +37,7 @@ class LlamaCppProfile(ProviderProfile):
     def __init__(self) -> None:
         super().__init__(
             name="llama-cpp",
-            aliases=("llamacpp", "llama"),
+            aliases=("llamacpp",),
             display_name="Llama CPP",
             description=(
                 "Local llama.cpp server — run GGUF models on-device "

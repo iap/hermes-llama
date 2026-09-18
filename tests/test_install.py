@@ -614,6 +614,157 @@ def test_wire_config_derives_base_url():
             _os.environ.pop(n, None)
             if v is not None: _os.environ[n] = v
 
+
+def test_wire_config_reads_native_provider_row():
+    """_wire_config falls back to providers.llama-cpp when nothing else set.
+
+    Regression: Hermes' native `hermes model` wizard writes the endpoint to
+    providers.llama-cpp in config.yaml, NOT to the plugin settings. Without a
+    fallback the server kept binding to the old address while the dashboard
+    row pointed at the new one — the change "took" in the model picker but
+    nothing moved. The fallback must be last-resort only: an env var or a
+    plugin setting still wins.
+
+    Hermetic: hermes_cli.config is stubbed (it is Hermes-runtime-only and not
+    installed in CI), so the test does not depend on a live Hermes install.
+    The stubs are restored in `finally` so later tests in the same process
+    see the real modules.
+    """
+    import importlib.util as _ilu
+    import os as _os
+    import sys as _sys
+    import types as _types
+    import tempfile
+    from pathlib import Path as _Path
+
+    if "providers" not in _sys.modules:
+        _stub = _types.ModuleType("providers")
+        _stub.register_provider = lambda p: None  # noqa: ARG001
+        _sys.modules["providers"] = _stub
+    if "providers.base" not in _sys.modules:
+        _stub_base = _types.ModuleType("providers.base")
+        class _PP:
+            def __init__(self, **kw): self.__dict__.update(kw)
+        _stub_base.ProviderProfile = _PP
+        _sys.modules["providers.base"] = _stub_base
+
+    # Stub hermes_cli.config so _read_native_provider_config reads OUR temp
+    # config.yaml. Without this the test depends on a live Hermes install
+    # (hermes_cli is not present in CI, where the import fails and the
+    # fallback silently returns None). Restored in `finally`.
+    import json as _json
+    _cfg_stub = _types.ModuleType("hermes_cli.config")
+
+    def _load_config():
+        path = _Path(_os.environ["HERMES_HOME"]) / "config.yaml"
+        try:
+            import yaml as _yaml
+            return _yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            try:
+                return _json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+
+    _cfg_stub.load_config = _load_config
+    # Snapshot the real hermes_cli modules BEFORE injecting our stubs. The
+    # stubs are runtime-only fakes (hermes_cli is not installed in CI); if we
+    # snapshot after injection we'd save the stub and "restore" it, leaving
+    # the real module clobbered for every later test in the process.
+    saved_hc = _sys.modules.get("hermes_cli")
+    saved_hcc = _sys.modules.get("hermes_cli.config")
+    _sys.modules["hermes_cli"] = _types.ModuleType("hermes_cli")
+    _sys.modules["hermes_cli.config"] = _cfg_stub
+
+    _p = _Path(__file__).resolve().parents[1] / "__init__.py"
+    _spec = _ilu.spec_from_file_location("_hmaudit_init2", _p)
+    assert _spec is not None and _spec.loader is not None
+    _mod = _ilu.module_from_spec(_spec)
+    _sys.modules["_hmaudit_init2"] = _mod
+    _spec.loader.exec_module(_mod)
+
+    keys = ("LLAMA_CPP_BASE_URL", "LLAMA_CPP_HOST", "LLAMA_CPP_PORT")
+    saved = {n: _os.environ.get(n) for n in keys}
+    saved_hh = _os.environ.get("HERMES_HOME")
+    for n in keys:
+        _os.environ.pop(n, None)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = _Path(tmp)
+            (hermes_home / "config.yaml").write_text(
+                "providers:\n"
+                "  llama-cpp:\n"
+                "    base_url: http://10.0.0.5:7777/v1\n",
+                encoding="utf-8",
+            )
+            _os.environ["HERMES_HOME"] = str(hermes_home)
+
+            class _Ctx:
+                def get_config(self, k):
+                    return None  # nothing set via plugin settings
+
+            _mod._wire_config(_Ctx())
+            assert _os.environ["LLAMA_CPP_BASE_URL"] == "http://10.0.0.5:7777/v1", _os.environ
+            assert _os.environ["LLAMA_CPP_HOST"] == "10.0.0.5"
+            assert _os.environ["LLAMA_CPP_PORT"] == "7777"
+
+            # A plugin setting beats the native row.
+            _os.environ.pop("LLAMA_CPP_HOST", None)
+            _os.environ.pop("LLAMA_CPP_PORT", None)
+            _os.environ["LLAMA_CPP_BASE_URL"] = "http://plugin:9000/v1"
+
+            class _Ctx2:
+                def get_config(self, k):
+                    return {"host": "plugin", "port": 9000}.get(k)
+
+            _mod._wire_config(_Ctx2())
+            assert _os.environ["LLAMA_CPP_BASE_URL"] == "http://plugin:9000/v1", _os.environ
+            assert _os.environ["LLAMA_CPP_HOST"] == "plugin"
+            assert _os.environ["LLAMA_CPP_PORT"] == "9000"
+
+        # A portless base_url must NOT fabricate 8080: the URL already
+        # targets the scheme default, so the port stays unset and the
+        # derivation block is skipped entirely (base_url is already set).
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = _Path(tmp)
+            (hermes_home / "config.yaml").write_text(
+                "providers:\n"
+                "  llama-cpp:\n"
+                "    base_url: http://localhost/v1\n",
+                encoding="utf-8",
+            )
+            _os.environ["HERMES_HOME"] = str(hermes_home)
+            for n in keys:
+                _os.environ.pop(n, None)
+
+            class _Ctx3:
+                def get_config(self, k):
+                    return None
+
+            _mod._wire_config(_Ctx3())
+            assert _os.environ["LLAMA_CPP_BASE_URL"] == "http://localhost/v1", _os.environ
+            assert "LLAMA_CPP_HOST" not in _os.environ, _os.environ
+            assert "LLAMA_CPP_PORT" not in _os.environ, _os.environ
+    finally:
+        for n, v in saved.items():
+            _os.environ.pop(n, None)
+            if v is not None:
+                _os.environ[n] = v
+        if saved_hh is None:
+            _os.environ.pop("HERMES_HOME", None)
+        else:
+            _os.environ["HERMES_HOME"] = saved_hh
+        # Restore the injected module stubs so later tests in the same
+        # process see the real hermes_cli / hermes_cli.config.
+        if saved_hc is None:
+            _sys.modules.pop("hermes_cli", None)
+        else:
+            _sys.modules["hermes_cli"] = saved_hc
+        if saved_hcc is None:
+            _sys.modules.pop("hermes_cli.config", None)
+        else:
+            _sys.modules["hermes_cli.config"] = saved_hcc
+
 def test_presets_are_wellformed():
     """Every preset has the keys pull()/serve() read, and unique aliases.
 
