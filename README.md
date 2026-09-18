@@ -138,6 +138,54 @@ not set a meaningful exit status yet; scripts should parse output, not `$?`.
 
 ## Configuration
 
+### Llama CPP is not Ollama / vLLM / LM Studio
+
+All four are **OpenAI-compatible local servers** — they all speak `/v1/chat/completions` and `/v1/models`, so Hermes can talk to any of them the same way. They differ in **server, port, model format, and the flag that sets context** — never in protocol:
+
+| | **Llama CPP** (this plugin) | Ollama | vLLM | LM Studio |
+|---|---|---|---|---|
+| Server | `llama-server` (C++, llama.cpp) | `ollama serve` | `vllm serve` | `lms server start` |
+| Port | 8080 (default) | 11434 | 8000 | 1234 |
+| Model format | GGUF file on disk | `ollama pull <name>` | HF repo id | `lms load <name>` |
+| Context flag | `LLAMA_CPP_CTX_SIZE` / `--ctx-size` | `OLLAMA_CONTEXT_LENGTH` / `num_ctx` | `--max-model-len` | `--context-length` |
+| Tool-calling | `--jinja` (on by default) | enabled by default | `--enable-auto-tool-choice --tool-call-parser hermes` | 0.3.6+ native |
+| Installs | this plugin (prebuilt + source) | `ollama install` | `pip install vllm` | GUI / `lms install` |
+
+If you are looking for "Llama CPP" in `hermes model` and see nothing, that is expected —
+the plugin registers it at load. If you instead wanted Ollama, vLLM, or LM Studio,
+they are separate providers (or custom endpoints) and this plugin does not manage
+them.
+
+> **"Llama CPP" vs "llama.cpp".** The provider id is `llama-cpp` and the display
+> name is `Llama CPP` (no dot, all-caps) — Hermes' own docs and this plugin's
+> source call the project `llama.cpp`. The plugin exposes the alias `llamacpp`
+> for `/model`. There is **no** `llama` alias: `llama` is the generic model-family
+> word (Ollama ships `llama3.1:8b`, vLLM serves `meta-llama/Llama-3.1-70B`), so
+> overloading it would silently shadow those models.
+
+### Adjusting configuration
+
+Everything the plugin needs comes from `LLAMA_CPP_*` environment variables, which
+are also mirrored into `plugins.entries.hermes-llama.settings.*` in
+`config.yaml`. Set them either way:
+
+```bash
+export LLAMA_CPP_PORT=9090          # takes effect immediately on the next serve
+```
+
+```bash
+hermes config set plugins.entries.hermes-llama.settings.port 9090   # restart serve to apply
+```
+
+An explicitly-set `LLAMA_CPP_*` env var **always wins** over the Hermes setting.
+
+**Where `hermes model` fits.** Hermes' native model wizard writes to the
+`providers.llama-cpp` row in `config.yaml`. The plugin reads that row back as a
+fallback (only when no env var or plugin setting has addressed the endpoint),
+so a change made through the wizard still reaches the server. The recommended
+path is the plugin settings above — the wizard row is a convenience, not the
+primary control surface, and the two are reconciled only at plugin load time.
+
 Environment variables (override plugin defaults):
 
 | Variable | Default | Meaning |

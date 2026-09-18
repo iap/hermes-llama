@@ -75,3 +75,17 @@ These get conflated; they are not interchangeable:
   first, then PATH. If the managed binary is broken, it won't fall back to a
   system copy — run `/llama upgrade` to replace it.
 - **TAMPER WARNING on install/upgrade** → the plugin records the sha256 of each downloaded archive. If you reinstall the same release tag and the archive digest has changed, the result detail includes a TAMPER WARNING. This is advisory change detection, not authentication — a compromised first download is accepted unchanged; the warning fires only when the archive changes after a known-good install. `check()` returns the recorded `archive_sha256` in its dict output.
+- **"Llama CPP" is not Ollama / vLLM / LM Studio.** All four are OpenAI-compatible
+  local servers (they all speak `/v1/chat/completions`), so Hermes talks to any
+  of them the same way. They differ in server, port, model format, and the flag
+  that sets context — never in protocol. If you wanted Ollama (port 11434,
+  `ollama pull`), vLLM (port 8000, HF repo id), or LM Studio (port 1234,
+  `lms load`), this plugin does not manage those; set them up separately.
+- **No `/model llama` alias.** The provider exposes `llamacpp` (and the display
+  name `Llama CPP`), not `llama` — `llama` is the generic model-family word
+  (Ollama ships `llama3.1:8b`, vLLM serves `meta-llama/Llama-3.1-70B`), so
+  overloading it would silently shadow those models.
+- **`hermes model` changes don't move the server.** The wizard writes to the
+  `providers.llama-cpp` row in `config.yaml`. The plugin reads that row back as
+  a fallback at load time, so the change still reaches the server — but the
+  primary control surface is `LLAMA_CPP_*` / `plugins.entries.hermes-llama.settings.*`.
